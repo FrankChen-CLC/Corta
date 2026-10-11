@@ -1268,3 +1268,22 @@ The four-pane 400×120 CPU gate has one render target per pane. GPU cell
 expansion remains dependent on #284; these pre-dependency figures do not
 approve that stage. Row-relative instance positions and shared ASCII atlases
 failed their benefit gates and were not adopted.
+
+
+### 5.16 Shared images, render ownership and idle energy (#291/#284/#290, 2026-10-11)
+
+[Implementation, measurements and acceptance limits](test-results/2026-10-11-render-image-energy.md)
+record three large-image decode/texture rounds, full-UV sampling, reader QoS
+throughput/backpressure, real cursor handoffs and a stalled rendering A/B.
+The render thread remains opt-in. The
+[final validation](test-results/2026-10-11-render-final-validation.md)
+supersedes the earlier failed latency gate with corrected echo attribution and
+quiet scheduling: the final steady/stalled A/B p50/p95/p99 improved, and
+1/2/4-pane flood interval p99 was 16.67 ms on the 60 Hz display. CPU-energy
+and complete hardware adoption criteria remain unverified, so
+`CORTA_RENDER_THREAD=1` is not approved for default use.
+The unchanged helper sandbox now receives an inherited
+anonymous mapping and emits only an eight-byte header. The
+[follow-up measurements](test-results/2026-10-11-followup.md) record actual
+Kitty payload-to-glass latency/footprint and real Swift-build/find CPU/wakeup
+proxies. Those proxies do not establish a power saving.

@@ -32,10 +32,12 @@ import Synchronization
 /// sandboxed runner that cannot read the unified log — gets the numbers.
 nonisolated enum RenderMetrics {
     enum Metric: String, CaseIterable {
+        case imageToPresent
         case keyDelivery
         case keypressToOutput
         case presentationSlip
         case echoToMain
+        case outputToFrame
         case mainToFrame
         case frameToGlass
         case wakeHop
@@ -62,7 +64,7 @@ nonisolated enum RenderMetrics {
     private static let log = OSLog(subsystem: "dev.noahqin.Corta", category: "render-metrics")
 
     /// Samples per summary: ~10 s at 60 Hz.
-    private static let capacity = 600
+    private static let capacity = DiagnosticsEnvironment.renderMetricsFrames() ?? 600
     /// 200 keystrokes, as earlier runs used; override with
     /// `CORTA_RENDER_METRICS_KEYSTROKES=<n>`.
     private static let keystrokeCapacity = DiagnosticsEnvironment.renderMetricsKeystrokes() ?? 200
@@ -71,8 +73,9 @@ nonisolated enum RenderMetrics {
     /// make render-path calls `async`. The summary file has its own.
     private struct State {
         var samples: [Metric: [Double]] = [:]
-        var pending: PendingKeystroke?
+        var echo = KeystrokeTracker()
         var conditions: Conditions?
+        var presentedImages: Set<TimeInterval> = []
     }
 
     private struct Conditions: Sendable {
@@ -101,7 +104,8 @@ nonisolated enum RenderMetrics {
             state.samples[metric, default: []].append(milliseconds)
             let limit: Int
             switch metric {
-            case .keypressToPresent, .keyDelivery, .keypressToOutput, .presentationSlip, .echoToMain, .mainToFrame, .frameToGlass, .wakeHop, .callbackLead, .firstAfterResume, .resumeToCallback, .frameInterval:
+            case .imageToPresent: limit = 1
+            case .keypressToPresent, .keyDelivery, .keypressToOutput, .presentationSlip, .echoToMain, .outputToFrame, .mainToFrame, .frameToGlass, .wakeHop, .callbackLead, .firstAfterResume, .resumeToCallback, .frameInterval:
                 limit = keystrokeCapacity
             case .drawableWait, .cpuFrame, .gpu, .gpuExecution, .gpuFeedbackDelay:
                 limit = capacity
@@ -167,17 +171,58 @@ nonisolated enum RenderMetrics {
         try? handle.write(contentsOf: Data(line.utf8))
     }
 
+    /// Registered only when a ready image texture is encoded into this frame.
+    /// A replaced drawable cannot complete the measurement; later frames retry.
+    static func noteImagePresent(of drawable: MTLDrawable, receivedAt: TimeInterval) {
+        guard isEnabled, !state.withLock({ $0.presentedImages.contains(receivedAt) }) else { return }
+        drawable.addPresentedHandler { drawable in
+            guard drawable.presentedTime > 0 else { return }
+            let elapsed = drawable.presentedTime - receivedAt
+            guard elapsed >= 0, elapsed < 30 else { return }
+            let first = state.withLock { state in
+                guard !state.presentedImages.contains(receivedAt) else { return false }
+                if state.presentedImages.count >= 512 { state.presentedImages.removeAll(keepingCapacity: true) }
+                state.presentedImages.insert(receivedAt)
+                return true
+            }
+            if first { record(.imageToPresent, milliseconds: elapsed * 1000) }
+        }
+    }
+
     // MARK: - Keypress → glass
 
     /// One keystroke in flight. A newer one replaces one that never echoed;
     /// that sample is dropped, never guessed.
-    private struct PendingKeystroke: Sendable {
+    struct PendingKeystroke: Sendable {
+        var sequence: UInt64
         var timestamp: TimeInterval
         var outputLanded = false
         var outputAt: TimeInterval?
         var mainAt: TimeInterval?
         /// Asks the pane for another frame (`TerminalView.setNeedsRedraw`).
         var requestFrame: @Sendable () -> Void
+    }
+
+    /// Snapshot ordering and drawable replacement are separate: an old retry
+    /// cannot restore its sample after a newer key has already been submitted.
+    struct KeystrokeTracker {
+        var pending: PendingKeystroke?
+        private var sequence: UInt64 = 0
+        mutating func note(timestamp: TimeInterval, requestFrame: @escaping @Sendable () -> Void) {
+            sequence &+= 1
+            pending = PendingKeystroke(sequence: sequence, timestamp: timestamp, requestFrame: requestFrame)
+        }
+        mutating func take(snapshotAt: TimeInterval?) -> PendingKeystroke? {
+            guard let snapshotAt, let pending, let outputAt = pending.outputAt,
+                outputAt <= snapshotAt else { return nil }
+            self.pending = nil
+            return pending
+        }
+        mutating func retry(_ sample: PendingKeystroke) -> Bool {
+            guard pending == nil, sequence == sample.sequence else { return false }
+            pending = sample
+            return true
+        }
     }
 
     /// Called at `TerminalView`'s three delivery sites. `NSEvent.timestamp`
@@ -188,7 +233,7 @@ nonisolated enum RenderMetrics {
     static func noteKeystroke(at timestamp: TimeInterval, requestFrame: @escaping @Sendable () -> Void) {
         guard isEnabled else { return }
         record(.keyDelivery, milliseconds: (CACurrentMediaTime() - timestamp) * 1000)
-        state.withLock { $0.pending = PendingKeystroke(timestamp: timestamp, requestFrame: requestFrame) }
+        state.withLock { $0.echo.note(timestamp: timestamp, requestFrame: requestFrame) }
     }
 
     /// A parse batch landed (reader thread); the first after a keystroke is
@@ -196,10 +241,10 @@ nonisolated enum RenderMetrics {
     static func noteOutputForKeystroke() {
         guard isEnabled else { return }
         let elapsed: Double? = state.withLock { state in
-            guard let pending = state.pending, !pending.outputLanded else { return nil }
+            guard let pending = state.echo.pending, !pending.outputLanded else { return nil }
             let now = CACurrentMediaTime()
-            state.pending?.outputLanded = true
-            state.pending?.outputAt = now
+            state.echo.pending?.outputLanded = true
+            state.echo.pending?.outputAt = now
             return (now - pending.timestamp) * 1000
         }
         if let elapsed { record(.keypressToOutput, milliseconds: elapsed) }
@@ -208,8 +253,8 @@ nonisolated enum RenderMetrics {
     static func noteMainHopForKeystroke() {
         guard isEnabled else { return }
         state.withLock { state in
-            guard state.pending?.outputLanded == true, state.pending?.mainAt == nil else { return }
-            state.pending?.mainAt = CACurrentMediaTime()
+            guard state.echo.pending?.outputLanded == true, state.echo.pending?.mainAt == nil else { return }
+            state.echo.pending?.mainAt = CACurrentMediaTime()
         }
     }
 
@@ -224,13 +269,9 @@ nonisolated enum RenderMetrics {
 
     /// Before presenting: if an echo is on the grid, this drawable's presented
     /// handler closes the sample when it is actually on screen.
-    static func notePresent(of drawable: MTLDrawable) {
+    static func notePresent(of drawable: MTLDrawable, snapshotAt: TimeInterval?) {
         guard isEnabled else { return }
-        let landed: PendingKeystroke? = state.withLock { state in
-            guard let keystroke = state.pending, keystroke.outputLanded else { return nil }
-            state.pending = nil
-            return keystroke
-        }
+        let landed = state.withLock { $0.echo.take(snapshotAt: snapshotAt) }
         guard let keystroke = landed else { return }
         let frameAt = CACurrentMediaTime()
         drawable.addPresentedHandler { presented in
@@ -240,20 +281,19 @@ nonisolated enum RenderMetrics {
             // display link parks, and without one the sample waits for the next
             // keystroke, which replaces it — under XCTest that lost five in six.
             guard presented.presentedTime > 0 else {
-                let repended = state.withLock { state in
-                    guard state.pending == nil else { return false }
-                    state.pending = keystroke
-                    return true
-                }
+                let repended = state.withLock { $0.echo.retry(keystroke) }
                 if repended { keystroke.requestFrame() }
                 return
             }
             let seconds = presented.presentedTime - keystroke.timestamp
             guard seconds >= 0, seconds < 2 else { return }
+            if let outputAt = keystroke.outputAt {
+                record(.outputToFrame, milliseconds: (frameAt - outputAt) * 1000)
+            }
+            record(.frameToGlass, milliseconds: (presented.presentedTime - frameAt) * 1000)
             if let outputAt = keystroke.outputAt, let mainAt = keystroke.mainAt {
                 record(.echoToMain, milliseconds: (mainAt - outputAt) * 1000)
                 record(.mainToFrame, milliseconds: (frameAt - mainAt) * 1000)
-                record(.frameToGlass, milliseconds: (presented.presentedTime - frameAt) * 1000)
             }
             record(.keypressToPresent, milliseconds: seconds * 1000)
         }
