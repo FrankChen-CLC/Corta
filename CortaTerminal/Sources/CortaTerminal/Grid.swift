@@ -209,6 +209,8 @@ public struct Grid: Sendable {
 
     public var linesRotated: UInt64 { lines.totalRotated }
     public var scrollEventsTotal: UInt64 { lines.scrollEventsTotal }
+    /// Events kept for replay; a consumer further behind rebuilds.
+    public static var scrollEventCapacity: Int { ScreenLines.scrollEventCapacity }
     public func scrollEvent(at sequence: UInt64) -> ScrollEvent? { lines.scrollEvent(at: sequence) }
 
     /// Test-only access without retaining a `Line` and sharing its buffer.
@@ -683,6 +685,9 @@ public struct Grid: Sendable {
         pendingWrap = false
     }
 
+    var hasCompressionWork: Bool {
+        scrollback.hasCompressionWork || suspendedMain?.grid.scrollback.hasCompressionWork == true
+    }
     func nextCompressionWork() -> Scrollback.CompressionWork? {
         scrollback.nextCompressionWork() ?? suspendedMain?.grid.scrollback.nextCompressionWork()
     }
@@ -1006,11 +1011,16 @@ public struct Grid: Sendable {
     public mutating func scrollUp(_ count: Int) {
         let count = min(max(0, count), marginBottom - marginTop + 1)
         guard count > 0 else { return }
-        // With no history (including the alternate screen), totalPushed
-        // cannot advance the image anchors. Move and clip them explicitly.
-        let saveToHistory = marginTop == 0 && marginBottom == rows - 1 && scrollback.limit > 0
-        if saveToHistory {
-            for row in 0..<count { scrollback.push(lines[row]) }
+        if marginTop == 0 && marginBottom == rows - 1 {
+            if scrollback.limit > 0 {
+                for row in 0..<count { scrollback.push(lines[row]) }
+            } else {
+                // No history (the alternate screen, `scrollback = 0`): no push
+                // advances the image anchors, so move and clip them here.
+                imagePlacements.scrollRegion(top: 0, bottom: rows - 1, delta: count,
+                    scrollbackTotal: scrollback.totalPushed, cellPixelHeight: cellPixelHeight)
+            }
+            // The ring's O(count) rotation either way, not the region's O(rows).
             lines.rotateUp(count)
             return
         }
@@ -1035,15 +1045,7 @@ public struct Grid: Sendable {
         guard cursor.row >= marginTop, cursor.row <= marginBottom else { return }
         let count = min(max(0, count), marginBottom - cursor.row + 1)
         guard count > 0 else { return }
-        var row = marginBottom
-        while row >= cursor.row + count {
-            lines[row] = lines[row - count]
-            row -= 1
-        }
-        while row >= cursor.row {
-            lines[row] = erasedLine()
-            row -= 1
-        }
+        shiftBand(by: -count)
         pendingWrap = false
     }
 
@@ -1052,16 +1054,22 @@ public struct Grid: Sendable {
         guard cursor.row >= marginTop, cursor.row <= marginBottom else { return }
         let count = min(max(0, count), marginBottom - cursor.row + 1)
         guard count > 0 else { return }
-        var row = cursor.row
-        while row + count <= marginBottom {
-            lines[row] = lines[row + count]
-            row += 1
-        }
-        while row <= marginBottom {
-            lines[row] = erasedLine()
-            row += 1
-        }
+        shiftBand(by: count)
         pendingWrap = false
+    }
+
+    /// IL and DL are scrolls of the band from the cursor to the bottom margin:
+    /// the same journaled rotation as SU/SD — the renderer shifts its cache
+    /// instead of rebuilding every row below the cursor — and images wholly
+    /// inside the band move with it. Exposed rows take the pen's background.
+    private mutating func shiftBand(by delta: Int) {
+        let top = cursor.row
+        imagePlacements.scrollRegion(top: top, bottom: marginBottom, delta: delta,
+            scrollbackTotal: scrollback.totalPushed, cellPixelHeight: cellPixelHeight)
+        lines.rotate(top: top, bottom: marginBottom, by: delta)
+        let exposed = delta > 0 ? (marginBottom - delta + 1)...marginBottom : top...(top - delta - 1)
+        let erased = erasedLine()
+        for row in exposed { lines[row] = erased }
     }
 
     public mutating func insertCharacters(_ count: Int) {

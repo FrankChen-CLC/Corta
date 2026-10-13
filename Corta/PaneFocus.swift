@@ -62,10 +62,6 @@ final class PaneFocus: NSObject {
     private var lastCursorGrid: Grid?
     private var blinkIsInvalidating = false
     private var cursorOffAt: CFTimeInterval?
-    var presentationToken: UInt64 { handoff.token }
-    var presentationPending: Bool {
-        handoff.phase == .awaitingLayer || handoff.phase == .awaitingMetal
-    }
 
     /// Retire the independent CA cursor before submitting a replacement Metal
     /// frame. Its graph removal still waits for a positive presented callback.
@@ -373,7 +369,11 @@ final class PaneFocus: NSObject {
                 guard self.handoff.phase == .metal else { return }
                 self.cursorBlinkVisible.toggle()
                 if !self.cursorBlinkVisible { self.cursorOffAt = CACurrentMediaTime() }
-                if !self.cursorBlinkVisible, let layer = self.makeIdleCursorLayer(),
+                // Capturing the cell waits on the GPU: only when a hand-off
+                // can still succeed, not for output that already superseded it.
+                if !self.cursorBlinkVisible,
+                    self.handoff.snapshot.outputRevision == self.lastCursorOutputRevision,
+                    let layer = self.makeIdleCursorLayer(),
                     self.handoff.handOff(expectedOutputRevision: self.lastCursorOutputRevision,
                         presentation: layer)
                         != nil

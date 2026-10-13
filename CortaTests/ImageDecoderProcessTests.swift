@@ -14,6 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+import CortaTerminal
 import Darwin
 import Foundation
 import Metal
@@ -61,11 +62,48 @@ struct ImageDecoderProcessTests {
         #expect(released.value == nil)
     }
 
+    /// Raw pixels are converted in process: no shared-memory object, no
+    /// descriptor, the same page-aligned no-copy texture.
+    @Test("in-process pixels map privately, with no descriptor")
+    func inProcessPixelsNeedNoSharedObject() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let pixels = try #require(ImageDecoderProcess.SharedPixels(
+            width: 4, height: 3,
+            alignment: device.minimumLinearTextureAlignment(for: .bgra8Unorm), shared: false))
+        #expect(pixels.descriptor == -1)
+        #expect(Int(bitPattern: pixels.address) % Int(getpagesize()) == 0)
+        #expect(pixels.texture(device: device, width: 4, height: 3) != nil)
+    }
+
     @Test("the decoder is embedded beside corta-exec")
     func helperIsEmbedded() throws {
         let helper = try #require(ImageDecoderProcess.bundledHelper)
         #expect(FileManager.default.isExecutableFile(atPath: helper))
         #expect((helper as NSString).deletingLastPathComponent.hasSuffix("Contents/MacOS"))
+    }
+
+    @Test("the decoder's sandbox denies a file read")
+    func helperSandboxDeniesFiles() throws {
+        let helper = try #require(ImageDecoderProcess.bundledHelper)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: helper)
+        process.arguments = ["--check-sandbox"]
+        process.environment = [:]
+        try process.run()
+        process.waitUntilExit()
+        #expect(process.terminationStatus == 0)
+    }
+
+    /// The cap is on pixels; row padding is not the image's. 4097 × 4095 is
+    /// under `maximumImagePixels`, and its padded rows pass 64 MiB.
+    @Test("an image at the pixel cap with an unaligned width still maps")
+    func paddedImageAtThePixelCapFits() throws {
+        #expect(4097 * 4095 <= KittyGraphics.maximumImagePixels)
+        let pixels = try #require(
+            ImageDecoderProcess.SharedPixels(width: 4097, height: 4095, alignment: 256))
+        #expect(pixels.length > KittyGraphics.maximumImageBytes)
+        #expect(pixels.length <= ImageDecoderProcess.SharedPixels.maximumLength)
+        #expect(ImageDecoderProcess.SharedPixels(width: 4097, height: 4096, alignment: 256) == nil)
     }
 
     @Test("output that disagrees with its own header is refused")

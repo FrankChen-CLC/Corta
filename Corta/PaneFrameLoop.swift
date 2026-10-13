@@ -48,9 +48,8 @@ final class PaneFrameLoop {
 
     private(set) var threadedEngine: PaneRenderEngine?
     var onPresented: ((UInt64) -> Void)?
-    var presentationPending: () -> Bool = { false }
-    var presentationToken: () -> UInt64 = { 0 }
-    var cursorHandoffSignal: CursorHandoffMailbox?
+    /// The pane's own (`PaneFocus.handoffSignal`), set before `attach`.
+    var cursorHandoffSignal = CursorHandoffMailbox()
     var afterThreadedFrame: ((Grid, Bool, Bool, UInt64, RenderInputSourceMetadata?) -> Void)?
     private(set) var session: TerminalSession?
     private(set) var renderer: TerminalRenderer?
@@ -103,7 +102,34 @@ final class PaneFrameLoop {
         self.session = session
         self.renderer = renderer
         threadedEngine?.suspend()
-        let engine = PaneRenderEngine(
+        threadedEngine = nil
+        // Only for the opt-in render thread (`CORTA_RENDER_THREAD=1`): on the
+        // default main-thread path an engine would never draw, yet wrap the
+        // renderer's callbacks and sit on every output batch.
+        if DiagnosticsEnvironment.usesRenderThread() {
+            threadedEngine = makeEngine(session: session, renderer: renderer, wake: wake, generation: generation)
+        }
+        needsRedraw = true
+        wasSynchronizedOutputActive = false
+        renderingStopped = false
+        watchdog?.cancel()
+        watchdog = nil
+        feedback = GPUFrameFeedback()
+        let cursorSignal = cursorHandoffSignal
+        cursorSignal.setSessionGeneration(generation)
+        let engine = threadedEngine
+        session.onOutput = { [weak self, weak engine, cursorSignal] in
+            cursorSignal.noteOutput(generation: generation)
+            if engine?.noteOutput() == true { return }
+            self?.noteOutput(generation: generation, wake: wake)
+        }
+        return generation
+    }
+
+    private func makeEngine(
+        session: TerminalSession, renderer: TerminalRenderer, wake: OutputWakeGate, generation: Int
+    ) -> PaneRenderEngine {
+        PaneRenderEngine(
             session: session, renderer: renderer, wake: wake, cursorSignal: cursorHandoffSignal,
             afterFrame: { [weak self] grid, output, bell, revision, metadata in
                 guard let self, self.isCurrent(generation) else { return }
@@ -117,21 +143,6 @@ final class PaneFrameLoop {
                 guard let self, self.isCurrent(generation) else { return }
                 self.onRenderingFailure?(error)
             })
-        threadedEngine = engine
-        needsRedraw = true
-        wasSynchronizedOutputActive = false
-        renderingStopped = false
-        watchdog?.cancel()
-        watchdog = nil
-        feedback = GPUFrameFeedback()
-        let cursorSignal = cursorHandoffSignal
-        cursorSignal?.setSessionGeneration(generation)
-        session.onOutput = { [weak self, weak engine, cursorSignal] in
-            cursorSignal?.noteOutput(generation: generation)
-            if engine?.noteOutput() == true { return }
-            self?.noteOutput(generation: generation, wake: wake)
-        }
-        return generation
     }
 
     /// Makes `view`'s display link drive this loop.
@@ -214,14 +225,9 @@ final class PaneFrameLoop {
     /// Per vsync. Returns whether a frame is owed: forced by `invalidate`
     /// or a `?2026` release, or damage the diff found.
     func prepareFrame() -> Bool {
-        let cursorAtStart = cursorHandoffSignal?.snapshot
-        preparedPresentationToken = cursorAtStart?.token ?? presentationToken()
-        preparedPresentationPending = cursorAtStart?.pending ?? presentationPending()
-        if let cursorAtStart {
-            preparedPresentationPending =
-                preparedPresentationPending
-                && cachedCursorVisible == (cursorAtStart.phase == .awaitingMetal)
-        }
+        let cursorAtStart = cursorHandoffSignal.snapshot
+        preparedPresentationToken = cursorAtStart.token
+        preparedPresentationPending = cursorAtStart.awaits(cursorDrawn: cachedCursorVisible)
         guard !renderingStopped, let session, let renderer else { return false }
         if session.takeBell() {
             onBell?()
@@ -243,12 +249,9 @@ final class PaneFrameLoop {
         guard let content = content?(hasOutput) else { return forced }
         renderer.echoSnapshotAt = snapshotAt
         cachedCursorVisible = content.cursorVisible
-        let cursor = cursorHandoffSignal?.snapshot
-        preparedPresentationToken = cursor?.token ?? presentationToken()
-        preparedPresentationPending = cursor?.pending ?? presentationPending()
-        if cursor?.phase == .awaitingMetal && !content.cursorVisible {
-            preparedPresentationPending = false
-        }
+        let cursor = cursorHandoffSignal.snapshot
+        preparedPresentationToken = cursor.token
+        preparedPresentationPending = cursor.awaits(cursorDrawn: content.cursorVisible)
         let indexedPalette = session.indexedPalette
         let damaged = renderer.updateInstances(
             grid: content.grid, scrollOffset: content.scrollOffset,
@@ -345,27 +348,18 @@ final class PaneFrameLoop {
         let background = TerminalColorPalette.clearColor
         let commit = InputLatencySignposts.begin(.commit)
         let token = preparedPresentationToken
-        let accepted = preparedPresentationPending ? FrameAcceptanceMarker() : nil
-        if let accepted {
-            drawable.addPresentedHandler { [weak self] presented in
-                let reachedGlass = presented.presentedTime > 0
-                Task { @MainActor in
-                    guard accepted.isAccepted, let self, self.isCurrent(generation)
-                    else {
-                        return
-                    }
-                    guard reachedGlass else {
-                        if let snapshot = self.cursorHandoffSignal?.snapshot, snapshot.pending,
-                            snapshot.token == token
-                        {
-                            self.invalidate()
-                        }
-                        return
-                    }
+        let accepted = preparedPresentationPending
+            ? cursorHandoffSignal.trackPresentation(
+                of: drawable, token: token,
+                retry: { [weak self] in
+                    guard let self, self.isCurrent(generation) else { return }
+                    self.invalidate()
+                },
+                presented: { [weak self] token in
+                    guard let self, self.isCurrent(generation) else { return }
                     self.onPresented?(token)
-                }
-            }
-        }
+                })
+            : nil
         let drawn = renderer.draw(
             rect: rect, drawableSize: drawableSize, target: drawable.texture,
             clearColor: MTLClearColorMake(

@@ -155,7 +155,9 @@ public nonisolated final class Metal4Backend {
         descriptor.usage = [.renderTarget]
         descriptor.storageMode = .private
         guard let fresh = device.makeTexture(descriptor: descriptor) else { return nil }
-        if let copyStaging { residencySet.removeAllocation(copyStaging) }
+        // A queued frame may still render into the old one: it leaves the
+        // residency set when that frame completes, like a retired buffer.
+        if let copyStaging { retired.append((frame: frameNumber, allocation: copyStaging)) }
         residencySet.addAllocation(fresh)
         residencySet.commit()
         copyStaging = fresh
@@ -226,9 +228,11 @@ public nonisolated final class Metal4Backend {
     /// an atlas bound every frame.
     private static let textureRetentionFrames: UInt64 = 60
 
-    /// Ring buffers outgrown mid-frame, tagged with the frame that last read
-    /// them; dropped once the GPU completes it.
-    private var retiredBuffers: [(frame: UInt64, buffer: MTLBuffer)] = []
+    /// Replaced allocations — outgrown ring buffers, a superseded rectangle
+    /// table, a resized present-by-copy staging texture — tagged with the
+    /// frame that last used them; they leave the residency set once the GPU
+    /// completes it.
+    private var retired: [(frame: UInt64, allocation: any MTLAllocation)] = []
 
     /// Instance storage for one pipeline kind, one buffer per slot. Draws
     /// append (instances plus uniforms) to the frame's slot. A buffer grows
@@ -296,6 +300,31 @@ public nonisolated final class Metal4Backend {
 
     private(set) var uploadedInstanceBytes = 0
     private(set) var uploadedRectangleBytes = 0
+
+    /// The glyph atlas's rectangle table by version: uploaded once per change,
+    /// not copied with every draw of every frame. A change gets a fresh
+    /// buffer, so a queued frame keeps reading the table it recorded.
+    private var rectangleTable: (version: UInt64, buffer: MTLBuffer)?
+
+    private func rectangleTableAddress(_ rects: [SIMD4<UInt16>], version: UInt64) -> MTLGPUAddress? {
+        if let rectangleTable, rectangleTable.version == version {
+            return rectangleTable.buffer.gpuAddress
+        }
+        let byteCount = rects.count * MemoryLayout<SIMD4<UInt16>>.stride
+        guard let buffer = device.makeBuffer(length: max(16, byteCount), options: .storageModeShared)
+        else { return nil }
+        rects.withUnsafeBytes { raw in
+            if let base = raw.baseAddress { buffer.contents().copyMemory(from: base, byteCount: raw.count) }
+        }
+        if let old = rectangleTable?.buffer {
+            retired.append((frame: frameNumber, allocation: old))
+        }
+        residencySet.addAllocation(buffer)
+        residencySet.commit()
+        rectangleTable = (version, buffer)
+        uploadedRectangleBytes += byteCount
+        return buffer.gpuAddress
+    }
     private let solidRing = InstanceBufferRing()
     private let glyphRing = InstanceBufferRing()
     private let colorGlyphRing = InstanceBufferRing()
@@ -447,21 +476,28 @@ public nonisolated final class Metal4Backend {
             rect: rect, drawableSize: drawableSize, label: "Corta.solid")
     }
 
+    /// `atlasRectsVersion`: `atlasRects` is the glyph atlas's table at that
+    /// version (`GlyphAtlas.atlasRectsVersion`), kept resident between
+    /// changes. Without it the table is copied with the draw.
     func drawGlyphQuads(
-        _ instances: [QuadInstance], atlas: MTLTexture, atlasRects: [SIMD4<UInt16>] = [], rect: CGRect, drawableSize: CGSize
+        _ instances: [QuadInstance], atlas: MTLTexture, atlasRects: [SIMD4<UInt16>] = [],
+        atlasRectsVersion: UInt64? = nil, rect: CGRect, drawableSize: CGSize
     ) {
         draw(
             instances, ring: glyphRing, pipeline: glyphPipeline, atlas: atlas, atlasRects: atlasRects,
+            atlasRectsVersion: atlasRectsVersion,
             rect: rect, drawableSize: drawableSize, label: "Corta.glyph")
     }
 
     /// Untinted premultiplied sampling: colour glyphs and Kitty images.
     func drawColorQuads(
-        _ instances: [QuadInstance], atlas: MTLTexture, atlasRects: [SIMD4<UInt16>] = [], rect: CGRect, drawableSize: CGSize,
+        _ instances: [QuadInstance], atlas: MTLTexture, atlasRects: [SIMD4<UInt16>] = [],
+        atlasRectsVersion: UInt64? = nil, rect: CGRect, drawableSize: CGSize,
         imageUVRect: SIMD4<Float> = .zero, transient: Bool = false
     ) {
         draw(
-            instances, ring: colorGlyphRing, pipeline: colorGlyphPipeline, atlas: atlas, atlasRects: atlasRects, imageUVRect: imageUVRect,
+            instances, ring: colorGlyphRing, pipeline: colorGlyphPipeline, atlas: atlas, atlasRects: atlasRects,
+            atlasRectsVersion: atlasRectsVersion, imageUVRect: imageUVRect,
             rect: rect, drawableSize: drawableSize, label: "Corta.colorGlyph", transientTexture: transient)
     }
 
@@ -499,8 +535,10 @@ public nonisolated final class Metal4Backend {
         let frame = frameNumber
         let completion = completion
         let slotReleased = slotSemaphores[currentSlot]
-        // A copied frame is complete when its copy is.
-        let completesHere = copyTarget == nil
+        // A copied frame completes when both its render and its copy have,
+        // with the first error of either: a faulted render under a clean
+        // copy must not report the frame as drawn.
+        let join = copyTarget == nil ? nil : onCompleted.map(FrameCompletionJoin.init)
         options.addFeedbackHandler { feedback in
             if let error = feedback.error {
                 completion.failed.store(true, ordering: .releasing)
@@ -508,7 +546,7 @@ public nonisolated final class Metal4Backend {
             }
             completion.note(frame)
             slotReleased.signal()
-            if completesHere { onCompleted?(feedback.error) }
+            if let join { join.complete(feedback.error) } else { onCompleted?(feedback.error) }
             // Keep the existing submission-to-callback metric intact. Native
             // timestamps distinguish execution from a delayed feedback thread.
             if RenderMetrics.isEnabled, feedback.gpuStartTime > 0,
@@ -521,9 +559,11 @@ public nonisolated final class Metal4Backend {
         }
         queue.commit([commandBuffer], options: options)
         if let copyTarget {
+            var copyCompleted: (@Sendable ((any Error)?) -> Void)?
+            if let join { copyCompleted = { error in join.complete(error) } }
             copyStaging(
                 into: copyTarget, presenting: drawable, echoSnapshotAt: echoSnapshotAt,
-                onCompleted: onCompleted)
+                onCompleted: copyCompleted)
         } else if let drawable {
             // After the commits targeting it, before presenting (MTL4 contract).
             queue.signalDrawable(drawable)
@@ -577,6 +617,7 @@ public nonisolated final class Metal4Backend {
         pipeline: MTLRenderPipelineState,
         atlas: MTLTexture?,
         atlasRects: [SIMD4<UInt16>] = [],
+        atlasRectsVersion: UInt64? = nil,
         imageUVRect: SIMD4<Float> = .zero,
         rect: CGRect,
         drawableSize: CGSize,
@@ -603,22 +644,28 @@ public nonisolated final class Metal4Backend {
             imageUVRect: imageUVRect
         )
         let instanceByteCount = MemoryLayout<QuadInstance>.stride * instances.count
+        var tableAddress: MTLGPUAddress?
+        if let atlasRectsVersion, !atlasRects.isEmpty {
+            guard let address = rectangleTableAddress(atlasRects, version: atlasRectsVersion) else { return }
+            tableAddress = address
+        }
+        let copiedRects = tableAddress == nil ? atlasRects : []
         guard
             let addresses = instances.withUnsafeBytes({ raw -> (MTLGPUAddress, MTLGPUAddress, MTLGPUAddress)? in
                 guard let base = raw.baseAddress else { return nil }
                 return ring.append(
-                    instances: base, instanceByteCount: instanceByteCount, uniforms: uniforms, atlasRects: atlasRects,
+                    instances: base, instanceByteCount: instanceByteCount, uniforms: uniforms, atlasRects: copiedRects,
                     slot: currentSlot, device: device, residencySet: residencySet
                 ) { [self] buffer in
-                    retiredBuffers.append((frame: frameNumber, buffer: buffer))
+                    retired.append((frame: frameNumber, allocation: buffer))
                 }
             })
         else { return }
         uploadedInstanceBytes += instanceByteCount
-        uploadedRectangleBytes += atlasRects.count * MemoryLayout<SIMD4<UInt16>>.stride
+        uploadedRectangleBytes += copiedRects.count * MemoryLayout<SIMD4<UInt16>>.stride
         argumentTable.setAddress(addresses.0, index: 0)
         argumentTable.setAddress(addresses.1, index: 1)
-        argumentTable.setAddress(addresses.2, index: 2)
+        argumentTable.setAddress(tableAddress ?? addresses.2, index: 2)
         if let atlas {
             makeResident(atlas, transient: transientTexture)
             argumentTable.setTexture(atlas.gpuResourceID, index: 0)
@@ -683,15 +730,12 @@ public nonisolated final class Metal4Backend {
 
     /// Releases retired resources whose retiring frame has completed.
     private func dropRetired(through completed: UInt64) {
-        var keptBuffers: [(frame: UInt64, buffer: MTLBuffer)] = []
         var removedAny = false
-        for entry in retiredBuffers {
-            if entry.frame <= completed {
-                residencySet.removeAllocation(entry.buffer)
-                removedAny = true
-            } else {
-                keptBuffers.append(entry)
-            }
+        retired.removeAll { entry in
+            guard entry.frame <= completed else { return false }
+            residencySet.removeAllocation(entry.allocation)
+            removedAny = true
+            return true
         }
         let expiredTextures = boundTextures.filter {
             $0.value.lastFrame + $0.value.retentionFrames <= completed
@@ -702,6 +746,25 @@ public nonisolated final class Metal4Backend {
             removedAny = true
         }
         if removedAny { residencySet.commit() }
-        retiredBuffers = keptBuffers
+    }
+}
+
+/// A frame presented by copy finishes on two queues, in either order. Its
+/// handler runs once, after both, with the first error either reported.
+nonisolated private final class FrameCompletionJoin: Sendable {
+    private struct State {
+        var remaining = 2
+        var error: (any Error)?
+    }
+    private let state = Mutex(State())
+    private let onCompleted: @Sendable ((any Error)?) -> Void
+    init(_ onCompleted: @escaping @Sendable ((any Error)?) -> Void) { self.onCompleted = onCompleted }
+    func complete(_ error: (any Error)?) {
+        let finished = state.withLock { state -> (done: Bool, error: (any Error)?) in
+            if state.error == nil { state.error = error }
+            state.remaining -= 1
+            return (state.remaining == 0, state.error)
+        }
+        if finished.done { onCompleted(finished.error) }
     }
 }
