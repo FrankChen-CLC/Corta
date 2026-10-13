@@ -21,17 +21,41 @@ import Testing
 @Suite("Disk image release rules")
 struct DiskImageTests {
     @Test func exactLayoutAndReadOnlyMount() {
-        #expect(ReleaseCheck.diskImageLayoutProblems(entries: ["Corta.app", "Applications"],
+        let root = ["Corta.app", "Applications", ".DS_Store", ".background"]
+        let background = ["background.tiff"]
+        #expect(ReleaseCheck.diskImageLayoutProblems(entries: root, backgroundEntries: background,
+            layoutFilesAreRegular: true, volumeName: "Corta",
             appIsDirectory: true, applicationsTarget: "/Applications", readOnly: true).isEmpty)
-        for entries in [["Corta.app"], ["Corta.app", "Applications", ".DS_Store"], ["Other.app", "Applications"]] {
-            #expect(!ReleaseCheck.diskImageLayoutProblems(entries: entries, appIsDirectory: true,
-                applicationsTarget: "/Applications", readOnly: true).isEmpty)
+        for entries in [["Corta.app", "Applications"], ["Corta.app", "Applications", ".background"],
+                        root + [".fseventsd"], ["Other.app", "Applications", ".DS_Store", ".background"]] {
+            #expect(!ReleaseCheck.diskImageLayoutProblems(entries: entries, backgroundEntries: background,
+                layoutFilesAreRegular: true, volumeName: "Corta",
+                appIsDirectory: true, applicationsTarget: "/Applications", readOnly: true).isEmpty)
         }
-        #expect(!ReleaseCheck.diskImageLayoutProblems(entries: ["Corta.app", "Applications"],
+        // A missing or non-directory .background is nil; extra files are rejected.
+        for entries in [nil, [], ["background.tiff", "payload.sh"], ["background.png"]] as [[String]?] {
+            #expect(!ReleaseCheck.diskImageLayoutProblems(entries: root, backgroundEntries: entries,
+                layoutFilesAreRegular: true, volumeName: "Corta",
+                appIsDirectory: true, applicationsTarget: "/Applications", readOnly: true).isEmpty)
+        }
+        // The layout's background is found through the volume name, and both
+        // layout files must be plain files, never a link or a directory.
+        for name in [nil, "Corta 1", "Corta 1.2.0"] as [String?] {
+            #expect(!ReleaseCheck.diskImageLayoutProblems(entries: root, backgroundEntries: background,
+                layoutFilesAreRegular: true, volumeName: name,
+                appIsDirectory: true, applicationsTarget: "/Applications", readOnly: true).isEmpty)
+        }
+        #expect(!ReleaseCheck.diskImageLayoutProblems(entries: root, backgroundEntries: background,
+            layoutFilesAreRegular: false, volumeName: "Corta",
+            appIsDirectory: true, applicationsTarget: "/Applications", readOnly: true).isEmpty)
+        #expect(!ReleaseCheck.diskImageLayoutProblems(entries: root, backgroundEntries: background,
+            layoutFilesAreRegular: true, volumeName: "Corta",
             appIsDirectory: false, applicationsTarget: "/Applications", readOnly: true).isEmpty)
-        #expect(!ReleaseCheck.diskImageLayoutProblems(entries: ["Corta.app", "Applications"],
+        #expect(!ReleaseCheck.diskImageLayoutProblems(entries: root, backgroundEntries: background,
+            layoutFilesAreRegular: true, volumeName: "Corta",
             appIsDirectory: true, applicationsTarget: "/tmp/Applications", readOnly: true).isEmpty)
-        #expect(!ReleaseCheck.diskImageLayoutProblems(entries: ["Corta.app", "Applications"],
+        #expect(!ReleaseCheck.diskImageLayoutProblems(entries: root, backgroundEntries: background,
+            layoutFilesAreRegular: true, volumeName: "Corta",
             appIsDirectory: true, applicationsTarget: "/Applications", readOnly: false).isEmpty)
     }
 

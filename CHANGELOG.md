@@ -26,6 +26,10 @@ Versioning for compatibility changes.
   system-rendered shell lighting. The development app uses the same artwork
   on an orange background. Retired raster icons and mascot animation are removed.
 
+- The disk image is an APFS volume compressed with lzma, about 15% smaller
+  to download than the zlib-compressed image 1.1.9 shipped. Opening it
+  shows a fixed window with Corta, an arrow and the Applications folder.
+
 - Kitty PNG decoding writes into anonymous shared pixel memory inherited by
   the sandboxed helper. Metal wraps the mapping without copying and blits it
   into a private texture on the GPU; raw RGB/RGBA pixels are reordered directly
