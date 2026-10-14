@@ -10,6 +10,20 @@ Versioning for compatibility changes.
 
 ## [Unreleased]
 
+### Added
+
+- The SSH and SFTP connect sheet has user, port and private-key fields
+  beside the host, the same for both: SFTP can now reach a non-default port
+  without a `~/.ssh/config` alias, and a chosen key is offered first, with
+  other `ssh-agent` keys left out. Recent connections remember the fields they were made with.
+
+### Changed
+
+- The remote badge at the front of a window title reads *Remote:* instead
+  of the `⟂` symbol, and a connection opened from the connect sheet names
+  the destination you typed instead of *host unknown*. Browse Remote Files…
+  in such a pane connects to that destination without asking for it again.
+
 ### Fixed
 
 - Configuration and user guides now include every scalar setting in the
@@ -19,6 +33,12 @@ Versioning for compatibility changes.
 - Release preparation and packaging checks accept version-independent README
   download instructions, so editing installation prose no longer breaks the
   release pipeline.
+- Renaming a tab and then clicking or switching to another tab, closing a
+  tab or entering full screen saves the name, instead of leaving the tab
+  blank and its editor stranded where the tab used to be.
+- The SFTP sign-in failure message no longer suggests connecting in the
+  terminal first, which does not let SFTP sign in; it points at a key held
+  by `ssh-agent` or the keychain, or one chosen in the connect sheet.
 
 ## [1.2.0] - 2026-10-13
 

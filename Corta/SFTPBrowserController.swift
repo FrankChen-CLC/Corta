@@ -40,14 +40,17 @@ final class SFTPBrowserController: NSWindowController, NSWindowDelegate {
 
     let model: SFTPBrowserModel
 
-    /// Opens the browser for a pane in `state`. Only called for `.remote`
-    /// and `.remoteUnknown` — `PaneRemote.canBrowseFiles` gates the menu
+    /// Opens the browser for a pane in `state`. Only called for `.remote`,
+    /// `.connected` and `.remoteUnknown` — `PaneRemote.canBrowseFiles` gates the menu
     /// item — and anything else is refused here as well, because a window
     /// over a local pane would be a silent local file manager wearing a
     /// remote UI.
     static func show(for state: PaneRemoteState) {
         switch state {
-        case .remote(let host, let directory, _):
+        case .remote(let reported, let directory, _):
+            // Child output: a bare host or `user@host`, never a port or a
+            // key, and named from here on as Corta names it.
+            guard let host = SSHTarget.named(reported)?.key else { return }
             if let open = byHost[host] {
                 open.present()
                 return
@@ -67,6 +70,12 @@ final class SFTPBrowserController: NSWindowController, NSWindowDelegate {
                 host: nil, startDirectory: directory, suggestedHost: host)
             unconnected[ObjectIdentifier(controller)] = controller
             controller.present()
+        case .connected(let key, let directory):
+            // The destination the user typed into the connect sheet — their
+            // own consent, as `open` takes it — in the directory the far end
+            // reported, if it has.
+            guard let target = SSHTarget(key: key) else { return }
+            open(target, startDirectory: directory)
         case .remoteUnknown:
             // The host is genuinely not known, and the rule stands:
             // never the launcher's argv (aliases and `~/.ssh/config` names
@@ -79,16 +88,18 @@ final class SFTPBrowserController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    /// The connect sheet's SFTP answer: a host the user typed or picked,
-    /// which is consent to connect to it. An open window for the host is
-    /// brought forward rather than a second session started.
-    static func open(host: String) {
+    /// The connect sheet's SFTP answer: a destination the user typed or
+    /// picked, which is consent to connect to it. An open window for the
+    /// same target — user, port and key alike — is brought forward rather
+    /// than a second session started; another key is another window.
+    static func open(_ target: SSHTarget, startDirectory: String? = nil) {
+        let host = target.key
         if let open = byHost[host] {
             open.present()
             return
         }
         RemoteHostConsent.confirm(host)
-        let controller = SFTPBrowserController(host: host, startDirectory: nil)
+        let controller = SFTPBrowserController(host: host, startDirectory: startDirectory)
         byHost[host] = controller
         controller.present()
     }
@@ -152,7 +163,7 @@ final class SFTPBrowserController: NSWindowController, NSWindowDelegate {
             // Connected means the user pressed Connect with this name in
             // front of them (or the name was confirmed earlier this run).
             RemoteHostConsent.confirm(host)
-            RecentHostsStore.shared.record(host)
+            if let target = SSHTarget(key: host) { RecentHostsStore.shared.record(target) }
         }
         model.onHostAbandoned = { [weak self] host in
             guard let self else { return }

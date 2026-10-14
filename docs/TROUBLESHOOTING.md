@@ -219,15 +219,16 @@ two-character spelling): the line is preserved in the config file
 unchanged and the default applies. View ▸ Quick Terminal and the *Toggle
 Quick Terminal* Shortcuts action open the panel regardless.
 
-### A remote pane's badge says "host unknown", or a local `tmux` says "remote?"
+### A remote pane's badge says "Remote: host unknown", or a local `tmux` says "Remote?"
 
-The badge names a host only from the remote shell's own `OSC 7` report —
-never from the `ssh` command line (aliases, `~/.ssh/config` names and
-jump-host chains all read back wrong) and never from the prompt text.
-Without that report an `ssh` pane says *host unknown*, which is the
-truth. To get the host, put the shell integration block from Settings ▸
+The badge names a host from the remote shell's own `OSC 7` report, or —
+for a connection opened from the connect sheet — from the destination you
+typed there. It never reads one from an `ssh` command line typed at a
+prompt (aliases, `~/.ssh/config` names and jump-host chains all read back
+wrong) or from the prompt text. Without either, an `ssh` pane says *host
+unknown*, which is the truth. To get the host, put the shell integration block from Settings ▸
 Terminal into the remote machine's `~/.zshrc` too; it emits the `OSC 7`
-the badge reads. A `tmux` or `screen` in the foreground reads *remote?*
+the badge reads. A `tmux` or `screen` in the foreground reads *Remote?*
 because the session it is attached to may itself be on another machine
 and nothing here can tell — it is uncertainty, not an accusation.
 
@@ -235,9 +236,10 @@ and nothing here can tell — it is uncertainty, not an accusation.
 
 The SFTP channel has no terminal, so `ssh` cannot ask for a password or a
 passphrase there. It works when a key is held by `ssh-agent` or the
-keychain, or when `ControlMaster` in `~/.ssh/config` lets it reuse the
-connection the pane already opened. A host that only takes a password
-cannot be browsed; the error says so rather than hanging.
+keychain, when you choose a private key in the connect form, or when
+`ControlMaster` in `~/.ssh/config` lets it reuse the connection the pane
+already opened. A host that only takes a password cannot be browsed; the
+error says so rather than hanging.
 
 ### Command History shows "(command text no longer in scrollback)"
 

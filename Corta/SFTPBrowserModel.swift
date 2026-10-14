@@ -150,9 +150,19 @@ final class SFTPBrowserModel {
     // MARK: - Published state
 
     /// `nil` until a host is known — either from the pane (`.remote`) or
-    /// typed in (`.needsHost`).
+    /// typed in (`.needsHost`). An `SSHTarget.key`: it carries the user,
+    /// port and key the connection is made with, and is what the window
+    /// registry, the transfer queue and remote editing name it by.
     private(set) var host: String?
-    var hostField = ""
+    /// The host as the window shows it.
+    var displayHost: String? { host.map(SSHTarget.displayName(forKey:)) }
+    /// The host step's form: host, user, port and key, as typed.
+    var fields = SSHTargetFields()
+    /// The form's host field alone.
+    var hostField: String {
+        get { fields.host }
+        set { fields.host = newValue }
+    }
     private var connectionGeneration = 0
     private var directoryGeneration = 0
 
@@ -240,8 +250,8 @@ final class SFTPBrowserModel {
         self.host = host
         self.startDirectory = startDirectory
         self.suggestedHost = host == nil ? suggestedHost : nil
-        if host == nil, let suggestedHost { hostField = suggestedHost }
-        self.makeClient = makeClient ?? { SFTPConnection.forApp(host: $0) }
+        if host == nil, let suggestedHost { fields = SSHTargetFields(host: suggestedHost) }
+        self.makeClient = makeClient ?? { SFTPConnection.forApp(key: $0) }
         connectionState = host == nil ? .needsHost : .connecting
     }
 
@@ -266,7 +276,7 @@ final class SFTPBrowserModel {
         case .needsHost:
             title = L10n.text("sftp.window.untitled")
         case .connecting, .connected, .failed:
-            title = host ?? L10n.text("sftp.window.untitled")
+            title = displayHost ?? L10n.text("sftp.window.untitled")
         }
         onTitleChange?(title)
     }
@@ -289,21 +299,27 @@ final class SFTPBrowserModel {
         if let host {
             name = host
         } else {
-            let trimmed = hostField.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty else { return }
-            host = trimmed
-            name = trimmed
+            guard !fields.isEmpty else { return }
+            switch fields.target {
+            case .success(let target):
+                host = target.key
+                name = target.key
+            case .failure(let problem):
+                connectionState = .failed(message: RemoteConnectForm.message(problem))
+                updateTitle()
+                return
+            }
         }
-        // The check every other way to name a host passes (`SSHDestination`):
+        // The check every other way to name a host passes (`SSHTarget`):
         // this field and a pane's OSC 7 report reached ssh's argv without it,
         // leaving ssh's own hostname rules as the only guard.
-        guard RemoteHostName.isAcceptable(name) else {
+        guard SSHTarget(key: name) != nil else {
             // As `changeHost` leaves a name: released, and the title no
             // longer showing it.
             onHostAbandoned?(name)
             host = nil
-            hostField = name
-            connectionState = .failed(message: L10n.text("ui.connect.invalidHost"))
+            fill(from: name)
+            connectionState = .failed(message: RemoteConnectForm.message(.host))
             updateTitle()
             return
         }
@@ -350,8 +366,9 @@ final class SFTPBrowserModel {
             guard generation == connectionGeneration else { return }
             let error = Self.sftpError(error)
             connectionState = .failed(message: Self.errorMessage(error, host: name))
-            // Left in the field, so the name that failed can be corrected.
-            hostField = name
+            // Left in the fields, so the destination that failed can be
+            // corrected.
+            fill(from: name)
             client.close()
             self.client = nil
         }
@@ -373,8 +390,10 @@ final class SFTPBrowserModel {
         disconnect()
         backStack.removeAll()
         forwardStack.removeAll()
-        hostField = host ?? hostField
-        if let host { onHostAbandoned?(host) }
+        if let host {
+            fill(from: host)
+            onHostAbandoned?(host)
+        }
         host = nil
         connectionState = .needsHost
         updateTitle()
@@ -384,10 +403,12 @@ final class SFTPBrowserModel {
     /// which the user may have corrected.
     func retry() {
         guard isFailed else { return }
-        let typed = hostField.trimmingCharacters(in: .whitespaces)
-        if !typed.isEmpty, typed != host {
+        let typed = fields
+        // The key is part of it: a key chosen or cleared after a failure is
+        // a different connection, even to the same place.
+        if !typed.isEmpty, (try? typed.target.get())?.key != host {
             changeHost()
-            hostField = typed
+            fields = typed
         }
         connect()
     }
@@ -398,6 +419,11 @@ final class SFTPBrowserModel {
     func cancelConnect() {
         guard connectionState == .connecting || isFailed else { return }
         changeHost()
+    }
+
+    /// The form's fields for a connection's key, to correct and retry.
+    private func fill(from name: String) {
+        fields = SSHTarget(key: name).map(SSHTargetFields.init) ?? SSHTargetFields(host: name)
     }
 
     var isFailed: Bool {
@@ -689,7 +715,7 @@ final class SFTPBrowserModel {
     /// is a courtesy, the server's own answer is authoritative; rmdir
     /// refuses a non-empty directory and that refusal is shown as such).
     func requestDelete(_ entries: [Entry]) {
-        guard connectionState == .connected, !entries.isEmpty, let client, let host else { return }
+        guard connectionState == .connected, !entries.isEmpty, let client, let host = displayHost else { return }
         let directory = currentPath
         let connection = connectionGeneration
         Task {
@@ -1054,7 +1080,8 @@ final class SFTPBrowserModel {
 
     /// The typed error categories, each in its own words — an auth failure
     /// is not "the host is unreachable", and neither is a generic "error".
-    nonisolated static func errorMessage(_ error: SFTPError, host: String) -> String {
+    nonisolated static func errorMessage(_ error: SFTPError, host key: String) -> String {
+        let host = SSHTarget.displayName(forKey: key)
         switch error {
         case .server(let status):
             if status.code == .permissionDenied {

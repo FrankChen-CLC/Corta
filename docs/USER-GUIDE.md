@@ -397,18 +397,24 @@ turn off directory suggestions.
 Corta uses the system's OpenSSH — your `~/.ssh/config`, keys, agent and
 `ProxyJump` all apply — and has no SSH implementation of its own.
 
-- **The host badge.** A pane connected to another machine shows a badge
-  at the front of the window title. It names the host when the remote shell
-  reports it (shell integration installed there); otherwise it says the
-  pane is remote without knowing which host.
+- **The host badge.** A pane connected to another machine shows
+  *Remote:* at the front of the window title. It names the host and folder
+  when the remote shell reports them (shell integration installed there),
+  and the destination you typed when the connection came from the connect
+  sheet; otherwise it says the pane is remote without knowing which host.
 - **Reconnect.** When an `ssh` or `mosh` session ends, **Reconnect to Host**
   runs the same command again, as a new connection.
 - **Connecting.** The toolbar's globe and folder buttons open a sheet for an
-  SSH terminal or an SFTP browser. It lists the hosts you connected to
-  recently and the `Host` names in your `~/.ssh/config`; type to narrow the
-  list, click one (or use ↑ and ↓ from the field) to fill it, double-click
-  or press Return to connect. Settings ▸
-  Privacy & Security ▸ Recent Hosts clears the recent ones.
+  SSH terminal or an SFTP browser, with the same fields for both: the host
+  (a name, an address or an SSH alias), the user, the port and a private
+  key. Leave any of the last three empty and your `~/.ssh/config` and
+  OpenSSH's defaults decide it; a chosen key is offered first, and other
+  keys in `ssh-agent` are not tried. The sheet lists the connections you made recently — with the
+  user, port and key they used — and the `Host` names in your
+  `~/.ssh/config`; type to narrow the list, click one (or use ↑ and ↓ from
+  the host field) to fill the fields, double-click or press Return to
+  connect. Settings ▸ Privacy & Security ▸ Recent Hosts clears the recent
+  ones.
 - **Browse Remote Files…** opens an SFTP browser for the pane's host: list,
   upload, download, rename and delete. The first connection to a host asks
   you to confirm the host name. Transfers resume after an interruption and
@@ -574,10 +580,10 @@ Settings is a sidebar of categories, the way System Settings is laid out:
 These controls edit the same config file. Custom theme colors can be edited
 graphically or through the file.
 
-The window toolbar adds SSH and SFTP. Both open a sheet on the window that
-accepts `user@host` or a config alias and suggests recent and configured
-hosts; an empty SSH port respects OpenSSH configuration, and SFTP takes its
-port from a `Host` alias. SFTP opens the remote pane's browser, or asks for a
+The window toolbar adds SSH and SFTP. Both open a sheet on the window with
+host, user, port and private-key fields — the host may be a config alias —
+and suggest recent and configured hosts; an empty user, port or key respects
+OpenSSH configuration. SFTP opens the remote pane's browser, or asks for a
 host when the pane is local ([Remote work](#remote-work-ssh-and-sftp)).
 
 ```ini

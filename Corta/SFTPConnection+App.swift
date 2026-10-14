@@ -28,7 +28,7 @@ extension SFTPConnection {
     /// `maximumDownloadBytes` bounds each download: remote editing passes
     /// one, since a server choosing what a ⌘-click fetches could otherwise
     /// fill the disk with no progress row to cancel from.
-    static func forApp(host: String, maximumDownloadBytes: UInt64? = nil) -> SFTPConnection {
+    static func forApp(key: String, maximumDownloadBytes: UInt64? = nil) -> SFTPConnection {
         let environment = ChildEnvironment.default()
         // Remote bytes landing on this Mac get Gatekeeper's first-open check.
         var engine = SFTPTransferEngine.Configuration()
@@ -37,12 +37,14 @@ extension SFTPConnection {
         // Every connection to one host claims its remote paths under the
         // same scope, so a browser upload and a remote-edit save to one file
         // take turns instead of sharing its partial.
-        engine.destinationScope = host
-        if let override = DiagnosticsEnvironment.sftpSSHExecutable() {
-            return SFTPConnection(
-                host: host, sshExecutable: override, environment: environment,
-                engineConfiguration: engine)
-        }
-        return SFTPConnection(host: host, environment: environment, engineConfiguration: engine)
+        engine.destinationScope = key
+        // `key` (`SSHTarget.key`) carries the user, port and key the
+        // connection is made with. Callers have already checked it.
+        let target = SSHTarget(key: key) ?? SSHTarget(host: key)
+        let arguments = SFTPSubprocessChannel.arguments(host: target.host, options: target.sshOptions)
+        return SFTPConnection(
+            host: key,
+            sshExecutable: DiagnosticsEnvironment.sftpSSHExecutable() ?? SFTPSubprocessChannel.defaultSSHPath,
+            arguments: arguments, environment: environment, engineConfiguration: engine)
     }
 }

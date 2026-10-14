@@ -661,7 +661,9 @@ final class PaneCommands: NSObject, NSMenuItemValidation {
             return (directory, remoteHost)
         case .local:
             return host.session?.workingDirectory.map { ($0, nil) }
-        case .remoteUnknown, .unknown:
+        case .connected(let target, let directory?):
+            return (directory, target)
+        case .connected, .remoteUnknown, .unknown:
             // Remote without a report, or a multiplexer: the local directory is
             // stale, and sending it to another machine's shell is a leak.
             return nil

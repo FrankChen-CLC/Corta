@@ -230,8 +230,63 @@ struct SFTPBrowserModelTests {
         model.connect()
         await Task.yield()
         #expect(fake.connectedHosts.isEmpty)
-        #expect(model.connectionState == .failed(message: L10n.text("ui.connect.invalidHost")))
+        #expect(model.connectionState == .failed(message: RemoteConnectForm.message(.host)))
         #expect(model.hostField == "evil;touch x", "left in the field to correct")
+    }
+
+    @Test("a typed user, port and key name the connection and reach ssh with it")
+    func typedFieldsNameTheConnection() async throws {
+        let fake = FakeSFTPClient()
+        let model = SFTPBrowserModel(host: nil, startDirectory: nil) { host in
+            fake.connectedHosts.append(host)
+            return fake
+        }
+        let host = "fields-\(UUID().uuidString.prefix(8).lowercased())"
+        model.fields = SSHTargetFields(host: host, user: "deploy", port: "2222")
+        model.connect()
+        await Task.yield()
+        #expect(fake.connectedHosts == ["deploy@\(host):2222"])
+        #expect(model.host == "deploy@\(host):2222")
+        // How `SFTPConnection.forApp` spawns it, and remote editing after it.
+        #expect(SSHTarget(key: "deploy@\(host):2222")?.sshOptions == ["-l", "deploy", "-p", "2222"])
+    }
+
+    /// A key chosen or cleared after a failed sign-in makes Retry a new
+    /// connection, though the place — and the display name — is the same.
+    @Test("retry with another key is another connection")
+    func retryWithAnotherKey() async throws {
+        let fake = FakeSFTPClient()
+        fake.connectError = .transport(.authenticationFailed(diagnostics: "Permission denied"))
+        let model = SFTPBrowserModel(host: nil, startDirectory: nil) { host in
+            fake.connectedHosts.append(host)
+            return fake
+        }
+        let key = FileManager.default.temporaryDirectory.appendingPathComponent("corta-key-\(UUID().uuidString)")
+        try Data("key".utf8).write(to: key)
+        defer { try? FileManager.default.removeItem(at: key) }
+        model.fields = SSHTargetFields(host: "box")
+        model.connect()
+        await waitUntil("the first sign-in fails") { model.isFailed }
+        model.fields.identityFile = key.path
+        model.retry()
+        await waitUntil("the retry connects") { fake.connectedHosts.count == 2 }
+        #expect(fake.connectedHosts == ["box", "box -i \(key.path)"])
+        #expect(model.displayHost == "box")
+    }
+
+    @Test("a form problem is said in its own words, and nothing is spawned")
+    func formProblemIsShown() async {
+        let fake = FakeSFTPClient()
+        let model = SFTPBrowserModel(host: nil, startDirectory: nil) { host in
+            fake.connectedHosts.append(host)
+            return fake
+        }
+        model.fields = SSHTargetFields(host: "deploy@box", user: "other")
+        model.connect()
+        await Task.yield()
+        #expect(fake.connectedHosts.isEmpty)
+        #expect(model.connectionState == .failed(message: RemoteConnectForm.message(.userTwice)))
+        #expect(model.fields.user == "other", "left in the fields to correct")
     }
 
     /// A host the pane *reported* is a suggestion: the window opens on the
