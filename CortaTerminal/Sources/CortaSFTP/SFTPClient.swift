@@ -144,6 +144,9 @@ public final class SFTPConnection: SFTPClient, @unchecked Sendable {
     private let arguments: [String]?
     /// The ssh child's environment — see `SFTPSubprocessChannel.spawn`.
     private let environment: [String: String]
+    /// Told each ssh's pid while it is still suspended, before it can have
+    /// asked anything: the app's askpass answers only its descendants.
+    private let onSpawn: (@Sendable (pid_t) -> Void)?
 
     /// For the transfer engine each session gets (`quarantinesDownloads`).
     private let engineConfiguration: SFTPTransferEngine.Configuration
@@ -151,9 +154,11 @@ public final class SFTPConnection: SFTPClient, @unchecked Sendable {
     public init(
         host: String, sshExecutable: String = SFTPSubprocessChannel.defaultSSHPath,
         arguments: [String]? = nil, environment: [String: String],
-        engineConfiguration: SFTPTransferEngine.Configuration = .init()
+        engineConfiguration: SFTPTransferEngine.Configuration = .init(),
+        onSpawn: (@Sendable (pid_t) -> Void)? = nil
     ) {
         self.engineConfiguration = engineConfiguration
+        self.onSpawn = onSpawn
         self.host = host
         self.sshExecutable = sshExecutable
         self.arguments = arguments
@@ -218,7 +223,7 @@ public final class SFTPConnection: SFTPClient, @unchecked Sendable {
         do {
             channel = try SFTPSubprocessChannel.spawn(
                 host: host, executable: sshExecutable, arguments: arguments,
-                environment: environment)
+                environment: environment, beforeStart: onSpawn)
         } catch {
             throw .transport(error)
         }
@@ -241,10 +246,9 @@ public final class SFTPConnection: SFTPClient, @unchecked Sendable {
             // *This* channel, by hand: the connection's pointer is moved to
             // a child only once its session is up, so on the first connect
             // there is nothing in `state` yet and `classified(_:)` alone
-            // would hand back the bare `.connectionLost`. A password prompt
-            // ssh could not show would then read "The connection was lost"
-            // in the browser, and never reach the "connect once in the
-            // terminal first" guidance.
+            // would hand back the bare `.connectionLost`. A refused password
+            // or an unaccepted host key would then read "The connection was
+            // lost" in the browser instead of saying which it was.
             throw await classified(error, over: channel)
         }
         return (channel, session)

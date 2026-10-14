@@ -22,10 +22,10 @@ import Synchronization
 /// The SFTP channel: the system `ssh -s -- <host> sftp` over plain pipes, so
 /// authentication, host keys and `~/.ssh/config` all belong to OpenSSH.
 ///
-/// The child has **no terminal** (its own session), so ssh cannot prompt: a
-/// password, an agent-less passphrase or an unknown host key fails as its own
-/// typed error whose remedy is connecting once in the terminal. `SSH_ASKPASS`
-/// is honoured by ssh itself.
+/// The child has **no terminal** (its own session), so ssh can prompt only
+/// through `SSH_ASKPASS`, which the app supplies (D27). Without it — a
+/// caller passing none — a password, an agent-less passphrase or an unknown
+/// host key fails as its own typed error.
 ///
 /// Pipes, not a PTY — line discipline would corrupt binary frames. Mirrored
 /// from `Spawn.child`: absolute paths only, `POSIX_SPAWN_CLOEXEC_DEFAULT`, the
@@ -44,7 +44,7 @@ public enum SFTPTransportError: Error, Equatable {
     case connectionLost
     case authenticationFailed(diagnostics: String)
     case hostUnreachable(diagnostics: String)
-    /// Unknown or changed host key; "yes" can never be typed here.
+    /// Unknown or changed host key, not accepted.
     case hostKeyUnverified(diagnostics: String)
     case subprocessFailed(exitCode: Int32, diagnostics: String)
 
@@ -101,13 +101,20 @@ public final class SFTPSubprocessChannel: SFTPChannelTransport, @unchecked Senda
     /// caller has validated, since they are passed as they are — name a user
     /// (`-l`), a port (`-p`) or a key (`-i`) of their own.
     ///
-    /// What a file channel never needs is switched off, as `sftp(1)` itself
-    /// does: a `ForwardAgent yes` meant for interactive logins would hand the
-    /// agent to a host a pane's OSC 7 named, and `LocalForward`/`RemoteForward`
-    /// would open ports for every browser and remote-edit connection.
+    /// What a file channel never needs is switched off, as `sftp(1)` and
+    /// `scp(1)` themselves do: a `ForwardAgent yes` meant for interactive
+    /// logins would hand the agent to a host a pane's OSC 7 named, and
+    /// `LocalForward`/`RemoteForward` would open ports for every browser and
+    /// remote-edit connection. A `RemoteCommand` meant for logins makes ssh
+    /// refuse the subsystem outright, and `RequestTTY force` would put a
+    /// remote terminal's line discipline between the binary frames. And
+    /// the channel never becomes a `ControlMaster` itself — a master left
+    /// behind would outlive the window — though it still reuses one the
+    /// user's terminal opened.
     public static let channelOptions = [
         "-oForwardAgent=no", "-oForwardX11=no", "-oClearAllForwardings=yes",
-        "-oPermitLocalCommand=no",
+        "-oPermitLocalCommand=no", "-oRemoteCommand=none", "-oRequestTTY=no",
+        "-oControlMaster=no",
     ]
 
     public static func arguments(host: String, options: [String] = []) -> [String] {
@@ -167,7 +174,8 @@ public final class SFTPSubprocessChannel: SFTPChannelTransport, @unchecked Senda
         host: String,
         executable: String = SFTPSubprocessChannel.defaultSSHPath,
         arguments: [String]? = nil,
-        environment: [String: String]
+        environment: [String: String],
+        beforeStart: (@Sendable (pid_t) -> Void)? = nil
     ) throws(SFTPTransportError) -> SFTPSubprocessChannel {
         guard executable.hasPrefix("/") else { throw .executablePathNotAbsolute }
 
@@ -201,10 +209,13 @@ public final class SFTPSubprocessChannel: SFTPChannelTransport, @unchecked Senda
         defer { posix_spawnattr_destroy(&attributes) }
         // `SETSID`: otherwise a Corta launched from a terminal hands ssh that tty,
         // and a prompt hangs in a window nobody is looking at.
+        // `START_SUSPENDED` when someone must know the pid before the child
+        // runs a single instruction (`beforeStart`); resumed just below.
         posix_spawnattr_setflags(
             &attributes,
             Int16(POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGDEF
-                | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSID))
+                | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSID
+                | (beforeStart == nil ? 0 : POSIX_SPAWN_START_SUSPENDED)))
         var allSignals = sigset_t()
         sigfillset(&allSignals)
         posix_spawnattr_setsigdefault(&attributes, &allSignals)
@@ -238,6 +249,10 @@ public final class SFTPSubprocessChannel: SFTPChannelTransport, @unchecked Senda
             throw .spawnFailed(code: spawnResult)
         }
 
+        if let beforeStart {
+            beforeStart(pid)
+            kill(pid, SIGCONT)
+        }
         let channel = SFTPSubprocessChannel(
             pid: pid, host: host,
             stdinWrite: stdinPipe[1], stdoutRead: stdoutPipe[0],
