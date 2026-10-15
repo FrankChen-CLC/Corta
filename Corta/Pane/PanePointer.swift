@@ -56,10 +56,14 @@ final class PanePointer: NSObject {
     /// Underlined, so the target shows before a click opens it.
     var hoveredLink: TerminalSelection?
     var scrollPositionIndicator: ScrollPositionIndicator?
+    /// What the selection's rows held when it was made, and which selection
+    /// that was (`dropSelectionIfRewritten(in:)`).
+    var selectionContent: (selection: TerminalSelection, content: SelectionContent)?
 
     /// The pane's view and session are being replaced: the pill and the
     /// hover belonged to the old ones.
     func reset() {
+        selectionContent = nil
         scrollPositionIndicator?.removeFromSuperview()
         scrollPositionIndicator = nil
         hoveredLink = nil
@@ -115,6 +119,7 @@ final class PanePointer: NSObject {
         view.accessibilitySnapshotProvider = { [weak self] in
             guard let self, let session else { return nil }
             let grid = session.snapshot()
+            dropSelectionIfRewritten(in: grid)
             return TerminalAccessibilitySnapshot(
                 grid: grid,
                 selection: selection.map { selectionRange(for: $0, in: grid) },
@@ -208,11 +213,11 @@ final class PanePointer: NSObject {
     @objc func selectAll(_: Any?) {
         guard session != nil else { return }
         let grid = session.snapshot()
-        selection = TerminalSelection(
-            start: GridPosition(row: -grid.scrollback.count, column: 0),
-            end: GridPosition(row: grid.rows - 1, column: grid.columns - 1),
-            baseScrollbackTotal: grid.scrollback.totalPushed)
-        invalidateDisplay()
+        setSelection(
+            SelectionRange(
+                start: SelectionPoint(row: -grid.scrollback.count, column: 0),
+                end: SelectionPoint(row: grid.rows - 1, column: grid.columns - 1)),
+            in: grid)
     }
 
 }

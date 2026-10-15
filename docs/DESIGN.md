@@ -125,6 +125,23 @@ selection anchored on it would drift onto whatever text arrived
 underneath it. The counter keeps rising, so the shift is right whether the ring is
 filling or flooding.
 
+Output that *rewrites* a selected row in place is the other case, and it
+drops the selection instead: a printed character, an erase, an insert or
+delete, a region scroll or the alternate screen leaves the highlight
+naming text it no longer covers — Claude Code's redraw (cursor up,
+`CSI 2K`, write again) left a bar across whatever came next (#341).
+`Selection.content(of:in:)` records the selected text and its rows'
+revisions as the selection is made; the pane compares once a frame and
+before a copy or an export (`PanePointer.dropSelectionIfRewritten`). An
+unchanged revision is unchanged text — revisions travel with their lines
+through a full-screen scroll — and only a changed one reads the cells, so
+a row rewritten with the same text (Ink redraws every line it owns), a
+write in columns the selection does not cover, and output filling
+selected blank space (a select-all over empty rows) all keep it. Clearing
+the history under it (`CSI 3J`) drops it. Alacritty, xterm and URxvt drop
+a selection an erase overlaps; Corta also drops one whose text a write
+changes, which is what a redraw does.
+
 Reflow and search must preserve these invariants: reflow
 rewrites document rows wholesale and must invalidate or re-anchor any
 live selection, and search matches must be reported in the same document
