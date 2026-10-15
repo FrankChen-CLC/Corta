@@ -76,7 +76,7 @@ import CortaTerminal
     }
 
     func update(grid: Grid, hasIntegration: Bool, promptRow: Int?, focused: Bool,
-        scrollOffset: Int, configuration: Configuration, cellSize: CGSize,
+        scrollOffset: Int, configuration: Configuration, canvas: CanvasTextColors, cellSize: CGSize,
         topInset: CGFloat, compositionRect: CGRect?, blockedRects: [CGRect] = []) {
         guard let source, focused,
             configuration.inputSourceIndicator != .off,
@@ -99,7 +99,7 @@ import CortaTerminal
             return
         }
         if !promptPlaced {
-            view.update(source: source, configuration: configuration)
+            view.update(source: source, configuration: configuration, canvas: nil)
             let frame = CGRect(x: 0, y: 0, width: 28, height: 24)
             if view.frame != frame { view.frame = frame }
             if view.isHidden { view.isHidden = false }
@@ -117,7 +117,7 @@ import CortaTerminal
         guard !blockedRects.contains(where: { $0.intersects(rect) }) else {
             if !view.isHidden { view.isHidden = true }
             return }
-        view.update(source: source, configuration: configuration)
+        view.update(source: source, configuration: configuration, canvas: canvas)
         if view.frame != rect { view.frame = rect }
         if view.isHidden { view.isHidden = false }
     }
@@ -173,6 +173,9 @@ nonisolated struct InputSourceIndicatorPlacement {
     private let label = NSTextField(labelWithString: "")
     private var source: InputSourceState?
     private var configuration = Configuration()
+    /// The theme's colours when the badge sits on the canvas, beside the
+    /// prompt; nil in the toolbar, which is window chrome and follows macOS.
+    private var canvas: CanvasTextColors?
     override var isFlipped: Bool { true }
     override func isAccessibilityElement() -> Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
@@ -197,10 +200,12 @@ nonisolated struct InputSourceIndicatorPlacement {
         label.frame = CGRect(x: 0, y: (bounds.height - height) / 2, width: bounds.width, height: height)
     }
 
-    func update(source: InputSourceState, configuration: Configuration) {
-        guard self.source != source || self.configuration != configuration else { return }
+    func update(source: InputSourceState, configuration: Configuration, canvas: CanvasTextColors?) {
+        guard self.source != source || self.configuration != configuration || self.canvas != canvas
+        else { return }
         self.source = source
         self.configuration = configuration
+        self.canvas = canvas
         label.stringValue = source.badge
         let description = source.kind == .unknown
             ? L10n.format("inputSource.unknown", source.name)
@@ -215,16 +220,32 @@ nonisolated struct InputSourceIndicatorPlacement {
     }
     private func applyColors() {
         guard let source else { return }
+        // On the canvas, system colours resolve against the canvas's darkness;
+        // in the toolbar the badge inherits the window's (#348).
+        let wanted = canvas?.appearance
+        if appearance?.name != wanted?.name { appearance = wanted }
+        effectiveAppearance.performAsCurrentDrawingAppearance { applyColors(source) }
+    }
+    private func applyColors(_ source: InputSourceState) {
         let custom = source.kind == .direct ? configuration.inputSourceDirectColor : configuration.inputSourceIMEColor
         // Default presentation stays quiet. Explicit custom backgrounds retain
         // their original contrast-aware behavior.
         if custom.isEmpty || source.kind == .unknown {
             let tinted = source.kind == .ime || source.kind == .nonLatinLayout
-            label.textColor = source.kind == .direct ? .secondaryLabelColor
-                : tinted ? .systemIndigo : .secondaryLabelColor
-            layer?.backgroundColor = (tinted ? NSColor.systemIndigo : .secondaryLabelColor)
-                .withAlphaComponent(0.08).cgColor
-            layer?.borderWidth = SystemAccessibility.increaseContrast ? 1 : 0
+            if let canvas, !tinted {
+                // Direct input on the canvas: the theme's own text, faded, so
+                // a theme darker or lighter than macOS still reads (#348).
+                label.textColor = NSColor(cgColor: canvas.text(alpha: 0.65, contrastAlpha: 1))
+                layer?.backgroundColor = canvas.text(alpha: 0.08, contrastAlpha: 0.12)
+            } else {
+                // The indigo of an IME mode stays its cue; resolved against the
+                // canvas's appearance above, it is the variant that reads there.
+                label.textColor = tinted ? .systemIndigo : .secondaryLabelColor
+                layer?.backgroundColor = (tinted ? NSColor.systemIndigo : .secondaryLabelColor)
+                    .withAlphaComponent(tinted && canvas != nil ? 0.16 : 0.08).cgColor
+            }
+            let increaseContrast = canvas?.increaseContrast ?? SystemAccessibility.increaseContrast
+            layer?.borderWidth = increaseContrast ? 1 : 0
             layer?.borderColor = label.textColor?.withAlphaComponent(0.4).cgColor
             return
         }
@@ -238,7 +259,7 @@ nonisolated struct InputSourceIndicatorPlacement {
         let luminance = 0.2126 * linear(rgb.redComponent) + 0.7152 * linear(rgb.greenComponent) + 0.0722 * linear(rgb.blueComponent)
         label.textColor = luminance > 0.179 ? .black : .white
         layer?.backgroundColor = background.cgColor
-        layer?.borderWidth = SystemAccessibility.increaseContrast ? 1 : 0.5
+        layer?.borderWidth = (canvas?.increaseContrast ?? SystemAccessibility.increaseContrast) ? 1 : 0.5
         layer?.borderColor = label.textColor?.withAlphaComponent(0.35).cgColor
     }
 }
