@@ -90,14 +90,18 @@ nonisolated final class GlyphAtlas {
     }
 
     struct GlyphKey: Hashable {
+        // periphery:ignore - read by the synthesised hash and ==
         var scalar: UInt32
+        // periphery:ignore - read by the synthesised hash and ==
         var style: Style
     }
 
     /// A multi-scalar cluster plus weight, keyed by contents rather than
     /// `GraphemeID`, which is reused across grids and table resets.
     struct ClusterKey: Hashable {
+        // periphery:ignore - read by the synthesised hash and ==
         var scalars: [UInt32]
+        // periphery:ignore - read by the synthesised hash and ==
         var style: Style
     }
 
@@ -120,24 +124,23 @@ nonisolated final class GlyphAtlas {
 
     /// One independently packed and evicted region: a shelf packer over a
     /// fixed rectangle plus its glyph and cluster caches.
-    private final class AtlasPage {
+    final class AtlasPage {
         let regionOrigin: (x: Int, y: Int)
         let regionSize: (width: Int, height: Int)
         var cache: [GlyphKey: GlyphInfo] = [:]
         var rectangleIndices: [SIMD4<UInt16>: UInt32] = [:]
         var clusterCache: [ClusterKey: GlyphInfo] = [:]
-        /// The ASCII page's cache, indexed by `(style << 7) | scalar`: the
-        /// per-cell lookup is an index, not a hash. Empty on other pages.
-        var asciiTable: ContiguousArray<GlyphInfo?>
         private var nextOrigin: (x: Int, y: Int)
         private var rowHeight: Int
 
-        /// - Parameter reservedFirstRow: skip the first row, which holds
-        ///   `GlyphAtlas.solidWhiteUV` (for `asciiPage`).
+        /// - Parameter regionOrigin: the page's corner in the atlas texture.
+        /// - Parameter regionSize: the page's extent in texels.
+        /// - Parameter reservedFirstRow: skip the first row, which holds the
+        ///   opaque texel at the origin that cursor and selection quads share
+        ///   the glyph pipeline through (for `asciiPage`; never evicted).
         init(regionOrigin: (x: Int, y: Int), regionSize: (width: Int, height: Int), reservedFirstRow: Bool) {
             self.regionOrigin = regionOrigin
             self.regionSize = regionSize
-            self.asciiTable = reservedFirstRow ? ContiguousArray(repeating: nil, count: 4 << 7) : []
             self.nextOrigin = reservedFirstRow ? (regionOrigin.x, regionOrigin.y + 1) : regionOrigin
             self.rowHeight = reservedFirstRow ? 1 : 0
         }
@@ -159,7 +162,6 @@ nonisolated final class GlyphAtlas {
         func evict(reservedFirstRow: Bool) {
             cache.removeAll(keepingCapacity: true)
             clusterCache.removeAll(keepingCapacity: true)
-            for index in asciiTable.indices { asciiTable[index] = nil }
             nextOrigin = reservedFirstRow ? (regionOrigin.x, regionOrigin.y + 1) : regionOrigin
             rowHeight = reservedFirstRow ? 1 : 0
         }
@@ -178,10 +180,10 @@ nonisolated final class GlyphAtlas {
     private(set) var atlasPixelSize: Int
     /// Allocation fell back to a smaller size; capacity is reduced.
     private(set) var isDegraded = false
-    private(set) var texture: MTLTexture
+    var texture: MTLTexture
     /// Premultiplied bgra, as `CTRunDraw` produces and the color pipeline
     /// blends.
-    private(set) var colorTexture: MTLTexture
+    var colorTexture: MTLTexture
     private(set) var atlasRects: [SIMD4<UInt16>] = [] {
         didSet { atlasRectsVersion = Self.nextRectsVersion.wrappingAdd(1, ordering: .relaxed).newValue }
     }
@@ -189,8 +191,8 @@ nonisolated final class GlyphAtlas {
     /// backend re-uploads the table only when it changed.
     private(set) var atlasRectsVersion: UInt64 = 0
     private static let nextRectsVersion = Atomic<UInt64>(0)
-    private var freeRectangleIndices: [UInt32] = []
-    private func rectangleIndex(page: AtlasPage, x: Int, y: Int, width: Int, height: Int) -> UInt32 {
+    var freeRectangleIndices: [UInt32] = []
+    func rectangleIndex(page: AtlasPage, x: Int, y: Int, width: Int, height: Int) -> UInt32 {
         let rect = SIMD4<UInt16>(UInt16(x), UInt16(y), UInt16(width), UInt16(height))
         if let index = page.rectangleIndices[rect] { return index }
         let index: UInt32
@@ -209,26 +211,31 @@ nonisolated final class GlyphAtlas {
     }
 
     /// Indexed by `Style.rawValue`, with whether each bold is synthetic.
-    private var fonts: [CTFont]
-    private var isSyntheticBold: [Bool]
+    var fonts: [CTFont]
+    var isSyntheticBold: [Bool]
     /// The two-cell box a color glyph is rasterised to fit, in pixels.
-    private var colorBox: CGSize
+    var colorBox: CGSize
 
     /// Font-sized ASCII region at the top of the grayscale texture.
-    private var asciiPage: AtlasPage
+    var asciiPage: AtlasPage
+    /// The ASCII page's glyphs, indexed by `(style << 7) | scalar`: the
+    /// per-cell lookup is an index, not a hash. A `let` buffer, not an
+    /// array in a `var`, so the read carries no exclusivity check; cleared
+    /// with the page.
+    let asciiTable: UnsafeMutableBufferPointer<GlyphInfo?>
     /// Shaped region below the ASCII shelves.
     private var shapedPage: AtlasPage
     /// The whole color texture.
-    private var colorPage: AtlasPage
+    var colorPage: AtlasPage
 
     /// Test counters: the ASCII path never shapes; fallback and eviction fire.
     private(set) var fastPathHits = 0
     private(set) var shapingHits = 0
-    private(set) var fallbackHits = 0
+    var fallbackHits = 0
     /// Page resets, across all pages.
-    private(set) var evictionCount = 0
+    var evictionCount = 0
     /// Bumped on any page's eviction; earlier UVs may be stale.
-    private(set) var generation = 0
+    var generation = 0
 
     /// Whether a committed frame may still sample the current textures. A
     /// reset or eviction then moves to fresh textures instead of rewriting
@@ -240,9 +247,9 @@ nonisolated final class GlyphAtlas {
     /// renderer lets it go once they complete.
     var onTextureRetired: (MTLTexture) -> Void = { _ in }
     /// Textures moved away from, for tests.
-    private(set) var textureReplacementCount = 0
-    private let storageMode: MTLStorageMode
-    private let allocateTexture: (MTLTextureDescriptor) -> MTLTexture?
+    var textureReplacementCount = 0
+    let storageMode: MTLStorageMode
+    let allocateTexture: (MTLTextureDescriptor) -> MTLTexture?
 
     /// Shapes `glyph(shaping:)` and `glyph(forCluster:)` may still run before
     /// `beginFrame` is called again; unlimited outside a frame. A screen of
@@ -272,12 +279,11 @@ nonisolated final class GlyphAtlas {
         return true
     }
 
-    /// An opaque texel at the origin, so cursor and selection quads share the
-    /// glyph pipeline. Reserved in `asciiPage`, never evicted.
-    static let solidWhiteUV = SIMD4<Float>(0, 0, 0, 0)
-
+    /// - Parameter device: the GPU the atlas texture lives on.
+    /// - Parameter font: the primary font, rasterised at its own size.
     /// - Parameter atlasPixelSize: the square atlas edge; tests pass a small
     ///   one to exercise eviction.
+    /// - Parameter storageMode: the texture's storage; tests measure each.
     /// - Parameter makeTexture: a test hook to fail allocations; nil uses the
     ///   device.
     init(
@@ -323,16 +329,22 @@ nonisolated final class GlyphAtlas {
         self.isDegraded = size < atlasPixelSize
 
         (self.asciiPage, self.shapedPage, self.colorPage) = Self.makePages(atlasPixelSize: size, font: base)
+        asciiTable = .allocate(capacity: 4 << 7)
+        asciiTable.initialize(repeating: nil)
 
         var white: UInt8 = 255
         texture.replace(
             region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: &white, bytesPerRow: 1)
     }
 
+    deinit {
+        asciiTable.deallocate()
+    }
+
     /// Two cells of `font`, which is already in pixels: the renderer's box
     /// for a wide glyph, so an emoji drawn to fit it is never scaled on the
     /// GPU.
-    private static func colorBox(for font: CTFont) -> CGSize {
+    static func colorBox(for font: CTFont) -> CGSize {
         let metrics = CellMetrics(font: font)
         return CGSize(width: metrics.cellWidth * 2, height: metrics.cellHeight)
     }
@@ -365,6 +377,7 @@ nonisolated final class GlyphAtlas {
         (fonts, isSyntheticBold) = Self.faces(of: base)
         colorBox = Self.colorBox(for: base)
         (asciiPage, shapedPage, colorPage) = Self.makePages(atlasPixelSize: atlasPixelSize, font: base)
+        asciiTable.update(repeating: nil)
         evictionCount += 1
         generation += 1
         clearRectangleTable()
@@ -396,11 +409,17 @@ nonisolated final class GlyphAtlas {
 
     /// ASCII fast path — see the type comment. The renderer passes only
     /// ASCII, looked up by index; anything else keeps a dictionary entry.
+    /// Inlined into the per-cell loop: a hit is one load. A miss leaves it.
+    @inline(__always)
     func glyph(forASCII scalar: UInt32, style: Style) -> GlyphInfo? {
+        if scalar < 0x80, let cached = asciiTable[Int(style.rawValue) << 7 | Int(scalar)] { return cached }
+        return rasterizeASCII(scalar, style: style)
+    }
+
+    @inline(never)
+    private func rasterizeASCII(_ scalar: UInt32, style: Style) -> GlyphInfo? {
         let index = scalar < 0x80 ? Int(style.rawValue) << 7 | Int(scalar) : nil
-        if let index {
-            if let cached = asciiPage.asciiTable[index] { return cached }
-        } else if let cached = asciiPage.cache[GlyphKey(scalar: scalar, style: style)] {
+        if index == nil, let cached = asciiPage.cache[GlyphKey(scalar: scalar, style: style)] {
             return cached
         }
         var utf16 = [UniChar(scalar)]
@@ -424,7 +443,7 @@ nonisolated final class GlyphAtlas {
 
     private func store(_ info: GlyphInfo, forASCII scalar: UInt32, style: Style, at index: Int?) {
         if let index {
-            asciiPage.asciiTable[index] = info
+            asciiTable[index] = info
         } else {
             asciiPage.cache[GlyphKey(scalar: scalar, style: style)] = info
         }
@@ -481,315 +500,14 @@ nonisolated final class GlyphAtlas {
     /// `ctLine` is held only to keep `ctRun` valid: a run's glyph storage
     /// belongs to its line, and once the line was freed
     /// `CTRunGetImageBounds` crashed intermittently.
-    private typealias ShapedRun = (
+    typealias ShapedRun = (
         glyphs: [CGGlyph], positions: [CGPoint], font: CTFont, isColor: Bool,
         ctRun: CTRun?, ctLine: CTLine?
     )
 
-    /// One shaped string as a flat list of runs, each with the font Core Text
-    /// resolved (possibly a fallback).
-    ///
-    /// `.notdef` glyphs are dropped (ZWJ can surface as one); `sawNotdef`
-    /// reports that every glyph was `.notdef`, so the caller draws a
-    /// placeholder.
-    private func shape(_ string: String, style: Style)
-        -> (runs: [ShapedRun], sawNotdef: Bool)
-    {
-        let requested = fonts[Int(style.rawValue)]
-        var sawNotdef = false
-        // Use the typed Foundation key instead of bridging a CFString-keyed
-        // Swift dictionary (the historical nil-attribute exception site).
-        let attributed = NSAttributedString(string: string, attributes: [.font: requested])
-        let line = CTLineCreateWithAttributedString(attributed)
-        guard let glyphRuns = CTLineGetGlyphRuns(line) as? [CTRun] else { return ([], false) }
-        var runs: [ShapedRun] = []
-        for run in glyphRuns {
-            let count = CTRunGetGlyphCount(run)
-            guard count > 0 else { continue }
-            let attributes = CTRunGetAttributes(run) as? [CFString: Any]
-            let runFont: CTFont
-            if let value = attributes?[kCTFontAttributeName] {
-                runFont = value as! CTFont
-            } else {
-                runFont = requested
-            }
-            if !CFEqual(runFont, requested) { fallbackHits += 1 }
-            // Bitmap fonts draw nothing through `CTFontDrawGlyphs`.
-            let isColor = CTFontGetSymbolicTraits(runFont).contains(.traitColorGlyphs)
-                || (CTFontCopyPostScriptName(runFont) as String).hasPrefix("AppleColorEmoji")
-            var glyphs = [CGGlyph](repeating: 0, count: count)
-            var positions = [CGPoint](repeating: .zero, count: count)
-            CTRunGetGlyphs(run, CFRange(location: 0, length: count), &glyphs)
-            CTRunGetPositions(run, CFRange(location: 0, length: count), &positions)
-            let kept = zip(glyphs, positions).filter { $0.0 != 0 }
-            if kept.isEmpty, glyphs.contains(0) { sawNotdef = true }
-            guard !kept.isEmpty else { continue }
-            runs.append(
-                (kept.map(\.0), kept.map(\.1), runFont, isColor,
-                 isColor ? run : nil, isColor ? line : nil))
-        }
-        return (runs, sawNotdef)
-    }
-
-    /// Rasterises runs into `page`, caching inkless results too. A color run
-    /// goes to `colorPage` instead (`rasterizeColor`).
-    private func rasterize(_ runs: [ShapedRun], style: Style, page: AtlasPage) -> GlyphInfo {
-        if runs.contains(where: \.isColor) {
-            return rasterizeColor(runs)
-        }
-        // No real bold face: stroke as well as fill, a twentieth of an em at
-        // each side, so `SGR 1` still reads bold (`TerminalFont.variant`).
-        let strokeWidth: CGFloat =
-            isSyntheticBold[Int(style.rawValue)]
-            ? CTFontGetSize(fonts[Int(style.rawValue)]) * 0.04
-            : 0
-        // A cluster's glyphs don't share an origin.
-        var bounds = CGRect.null
-        for run in runs {
-            var glyphs = run.glyphs
-            var rects = [CGRect](repeating: .zero, count: glyphs.count)
-            CTFontGetBoundingRectsForGlyphs(run.font, .horizontal, &glyphs, &rects, glyphs.count)
-            for (rect, position) in zip(rects, run.positions) {
-                bounds = bounds.union(rect.offsetBy(dx: position.x, dy: position.y))
-            }
-        }
-        guard !bounds.isNull, !bounds.isEmpty else {
-            return GlyphInfo(uvRect: .zero, size: .zero, bearing: .zero)
-        }
-        // Pad by a texel against bleed, plus half the synthetic stroke.
-        let pad = CGFloat(Self.bitmapPadding) + strokeWidth / 2
-        let bbox = bounds.insetBy(dx: -pad, dy: -pad)
-        guard bbox.width.isFinite, bbox.height.isFinite,
-            bbox.width > 0, bbox.height > 0,
-            bbox.width.rounded(.up) <= CGFloat(atlasPixelSize),
-            bbox.height.rounded(.up) <= CGFloat(atlasPixelSize - 1)
-        else { return GlyphInfo(uvRect: .zero, size: .zero, bearing: .zero, isMissing: true) }
-        let width = max(1, Int(bbox.width.rounded(.up)))
-        let height = max(1, Int(bbox.height.rounded(.up)))
-        var allocation = page.allocate(width: width, height: height)
-        if allocation == nil {
-            // Full: reset this page and retry once.
-            evict(page)
-            allocation = page.allocate(width: width, height: height)
-        }
-        guard let origin = allocation,
-            let context = CGContext(
-                data: nil, width: width, height: height, bitsPerComponent: 8,
-                bytesPerRow: width, space: CGColorSpaceCreateDeviceGray(),
-                bitmapInfo: CGImageAlphaInfo.none.rawValue)
-        else { return GlyphInfo(uvRect: .zero, size: .zero, bearing: .zero) }
-        context.setAllowsAntialiasing(true)
-        context.setShouldAntialias(true)
-        context.setShouldSmoothFonts(false)  // no subpixel AA since Mojave
-        context.setFillColor(gray: 1, alpha: 1)
-        if strokeWidth > 0 {
-            context.setStrokeColor(gray: 1, alpha: 1)
-            context.setLineWidth(strokeWidth)
-            context.setTextDrawingMode(.fillStroke)
-        }
-        // No CTM flip: the context's top-down buffer and y-up coordinates cancel,
-        // and the shader maps quad (0,0) to the region's top row. A flip drew
-        // every glyph upside down.
-        for run in runs {
-            var glyphs = run.glyphs
-            var positions = run.positions.map {
-                CGPoint(x: $0.x - bbox.minX, y: $0.y - bbox.minY)
-            }
-            CTFontDrawGlyphs(run.font, &glyphs, &positions, glyphs.count, context)
-        }
-
-        guard let data = context.data else {
-            return GlyphInfo(uvRect: .zero, size: .zero, bearing: .zero)
-        }
-        guard ensureHeight(.grayscale, required: origin.y + height) else {
-            // The one eviction path, so the page's rectangle indices return too.
-            evict(page)
-            return GlyphInfo(uvRect: .zero, size: .zero, bearing: .zero, isMissing: true)
-        }
-        texture.replace(
-            region: MTLRegionMake2D(origin.x, origin.y, width, height),
-            mipmapLevel: 0, withBytes: data, bytesPerRow: width)
-
-        return GlyphInfo(
-            uvRect: SIMD4<Float>(
-                Float(origin.x) / Float(atlasPixelSize), Float(origin.y) / Float(atlasPixelSize),
-                Float(width) / Float(atlasPixelSize), Float(height) / Float(atlasPixelSize)),
-            atlasIndex: rectangleIndex(page: page, x: origin.x, y: origin.y, width: width, height: height),
-            size: SIMD2<Float>(Float(width), Float(height)),
-            bearing: SIMD2<Float>(Float(bbox.minX), Float(bbox.minY))
-        )
-    }
-
-    /// The color half of `rasterize`, into `colorPage`.
-    ///
-    /// `CTRunDraw` is the only Core Text call that draws bitmaps, and
-    /// `CTRunGetImageBounds` knows their real extent; the text position is set
-    /// to `-bbox.origin`. The glyph is drawn scaled so its image, padding
-    /// included, fits `colorBox` exactly, and the renderer draws the bitmap
-    /// texel for texel. Drawn at the text size and scaled on the GPU instead,
-    /// a bitmap emoji came out smaller than its two cells and soft. For a
-    /// bitmap emoji the image bounds are the whole design square, so a small
-    /// design (🔸) keeps its size against a large one (🔶). Scaling the
-    /// context lets Core Text pick the strike for the size drawn. A grayscale run in a mixed cluster draws by outline
-    /// in white. Texels upload premultiplied, matching the color pipeline's
-    /// blend (`sourceRGB = .one`).
-    private func rasterizeColor(_ runs: [ShapedRun]) -> GlyphInfo {
-        let empty = GlyphInfo(uvRect: .zero, size: .zero, bearing: .zero, isColor: true)
-        var bounds = CGRect.null
-        for run in runs {
-            if let ctRun = run.ctRun {
-                // Length 0 means the whole run.
-                bounds = bounds.union(CTRunGetImageBounds(ctRun, nil, CFRange(location: 0, length: 0)))
-            } else {
-                var glyphs = run.glyphs
-                var rects = [CGRect](repeating: .zero, count: glyphs.count)
-                CTFontGetBoundingRectsForGlyphs(run.font, .horizontal, &glyphs, &rects, glyphs.count)
-                for (rect, position) in zip(rects, run.positions) {
-                    bounds = bounds.union(rect.offsetBy(dx: position.x, dy: position.y))
-                }
-            }
-        }
-        guard !bounds.isNull, !bounds.isEmpty, bounds.width.isFinite, bounds.height.isFinite else { return empty }
-        let pad = CGFloat(Self.bitmapPadding)
-        let fill = min(
-            (colorBox.width - 2 * pad) / bounds.width,
-            (colorBox.height - 2 * pad) / bounds.height)
-        guard fill.isFinite, fill > 0 else { return empty }
-        let scaled = CGRect(
-            x: bounds.minX * fill, y: bounds.minY * fill,
-            width: bounds.width * fill, height: bounds.height * fill)
-        let bbox = scaled.insetBy(dx: -pad, dy: -pad)
-        guard bbox.width.isFinite, bbox.height.isFinite,
-            bbox.width.rounded(.up) <= CGFloat(atlasPixelSize),
-            bbox.height.rounded(.up) <= CGFloat(atlasPixelSize) else { return empty }
-        let width = max(1, Int(bbox.width.rounded(.up)))
-        let height = max(1, Int(bbox.height.rounded(.up)))
-        guard width <= atlasPixelSize, height <= atlasPixelSize else { return empty }
-        var allocation = colorPage.allocate(width: width, height: height)
-        if allocation == nil {
-            // Full: reset this page and retry once.
-            evict(colorPage)
-            allocation = colorPage.allocate(width: width, height: height)
-        }
-        guard let origin = allocation,
-            let context = CGContext(
-                data: nil, width: width, height: height, bitsPerComponent: 8,
-                bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
-                    | CGBitmapInfo.byteOrder32Little.rawValue)
-        else { return empty }
-        context.setAllowsAntialiasing(true)
-        context.setShouldAntialias(true)
-        context.setShouldSmoothFonts(false)  // no subpixel AA since Mojave
-        context.setFillColor(red: 1, green: 1, blue: 1, alpha: 1)
-        // No CTM flip, as in the grayscale path. Positions are in the
-        // unscaled space the scale maps onto the bitmap.
-        context.scaleBy(x: fill, y: fill)
-        let offset = CGPoint(x: bbox.minX / fill, y: bbox.minY / fill)
-        for run in runs {
-            if let ctRun = run.ctRun {
-                context.textPosition = CGPoint(x: -offset.x, y: -offset.y)
-                CTRunDraw(ctRun, context, CFRange(location: 0, length: 0))
-            } else {
-                var glyphs = run.glyphs
-                var positions = run.positions.map {
-                    CGPoint(x: $0.x - offset.x, y: $0.y - offset.y)
-                }
-                CTFontDrawGlyphs(run.font, &glyphs, &positions, glyphs.count, context)
-            }
-        }
-
-        guard let data = context.data else { return empty }
-        guard ensureHeight(.color, required: origin.y + height) else {
-            evict(colorPage)
-            return empty
-        }
-        colorTexture.replace(
-            region: MTLRegionMake2D(origin.x, origin.y, width, height),
-            mipmapLevel: 0, withBytes: data, bytesPerRow: width * 4)
-
-        return GlyphInfo(
-            uvRect: SIMD4<Float>(
-                Float(origin.x) / Float(atlasPixelSize), Float(origin.y) / Float(atlasPixelSize),
-                Float(width) / Float(atlasPixelSize), Float(height) / Float(atlasPixelSize)),
-            atlasIndex: rectangleIndex(page: colorPage, x: origin.x, y: origin.y, width: width, height: height),
-            size: SIMD2<Float>(Float(width), Float(height)),
-            bearing: SIMD2<Float>(Float(bbox.minX), Float(bbox.minY)),
-            isColor: true
-        )
-    }
-
-    /// Resets one page in place: its allocator rewinds and its caches clear,
-    /// so every lookup re-rasterises into rewritten texels.
-    private func evict(_ page: AtlasPage) {
-        freeRectangleIndices.append(contentsOf: page.rectangleIndices.values)
-        page.rectangleIndices.removeAll(keepingCapacity: true)
-        page.evict(reservedFirstRow: page === asciiPage)
-        evictionCount += 1
-        generation += 1
-        if texturesInUse() {
-            // The page's texels are about to be overwritten. The other
-            // grayscale page shares the texture, so its texels come along.
-            let kind: TextureKind = page === colorPage ? .color : .grayscale
-            replaceTexture(kind, copying: true)
-        }
-    }
-
-    private enum TextureKind: Hashable { case grayscale, color }
+    enum TextureKind: Hashable { case grayscale, color }
     /// Failed retirement allocation must never let a later miss overwrite
     /// texels referenced by an in-flight frame.
-    private var blockedTextureWrites: Set<TextureKind> = []
+    var blockedTextureWrites: Set<TextureKind> = []
 
-    /// Moves one texture to a fresh allocation, retaining the old
-    /// texels when `copying`. Only the CPU writes an atlas; the readback
-    /// works for both shared and managed storage. The old texture is
-    /// left exactly as queued frames recorded it. Failed allocation leaves
-    /// the old texture intact and the caller omits the unavailable glyph.
-    private func ensureHeight(_ kind: TextureKind, required: Int) -> Bool {
-        if blockedTextureWrites.contains(kind) {
-            if texturesInUse(), !replaceTexture(kind, copying: true) { return false }
-            blockedTextureWrites.remove(kind)
-        }
-        let old = kind == .color ? colorTexture : texture
-        if old.height >= required, old.width == atlasPixelSize { return true }
-        var height = min(atlasPixelSize, max(128, old.height))
-        while height < required { height = min(atlasPixelSize, height * 2) }
-        return replaceTexture(kind, copying: true, height: height, width: atlasPixelSize)
-    }
-
-    @discardableResult
-    private func replaceTexture(_ kind: TextureKind, copying: Bool, height: Int? = nil, width: Int? = nil) -> Bool {
-        let old = kind == .color ? colorTexture : texture
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: old.pixelFormat, width: width ?? old.width, height: height ?? old.height, mipmapped: false)
-        descriptor.usage = [.shaderRead]
-        descriptor.storageMode = storageMode
-        guard let fresh = allocateTexture(descriptor) else {
-            // The old texture stays, possibly still in flight: no texel
-            // write until a later replacement succeeds (`ensureHeight`).
-            blockedTextureWrites.insert(kind)
-            return false
-        }
-        if copying {
-            let bytesPerRow = old.width * (old.pixelFormat == .bgra8Unorm ? 4 : 1)
-            let region = MTLRegionMake2D(0, 0, old.width, old.height)
-            var bytes = [UInt8](repeating: 0, count: bytesPerRow * old.height)
-            bytes.withUnsafeMutableBytes { raw in
-                guard let base = raw.baseAddress else { return }
-                old.getBytes(base, bytesPerRow: bytesPerRow, from: region, mipmapLevel: 0)
-            }
-            bytes.withUnsafeBytes { raw in
-                guard let base = raw.baseAddress else { return }
-                fresh.replace(region: region, mipmapLevel: 0, withBytes: base, bytesPerRow: bytesPerRow)
-            }
-        }
-        switch kind {
-        case .grayscale: texture = fresh
-        case .color: colorTexture = fresh
-        }
-        blockedTextureWrites.remove(kind)
-        textureReplacementCount += 1
-        onTextureRetired(old)
-        return true
-    }
 }

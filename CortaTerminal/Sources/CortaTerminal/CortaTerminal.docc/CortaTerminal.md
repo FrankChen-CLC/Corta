@@ -56,7 +56,6 @@ fuzzing and app-level verification.
 - ``PTY``
 - ``Terminal``
 - ``Parser``
-- ``Performer``
 
 ### The grid
 
@@ -87,12 +86,11 @@ fuzzing and app-level verification.
 - ``IndexedPalette``
 - ``SpecialColors``
 - ``DynamicColors``
-- ``KeyboardProtocolStack``
+- ``KeyboardEnhancementFlags``
 - ``KittyGraphics``
 
 ### Processes
 
 - ``ChildEnvironment``
-- ``ChildExit``
 - ``PTYError``
 - ``TerminalSize``

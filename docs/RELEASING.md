@@ -116,12 +116,13 @@ and a signed feed with zero grace period; neither security setting changes.
 After a packaging change merges on main, run the signed/notarised dry run
 before requesting a real release. Validate both image and app, checksum,
 drag-install and offline first launch on Apple silicon without changing
-machine-wide settings. After the first DMG release, test Check for Updates
-from the latest ZIP install (1.1.8 at the transition) and a successful
-restart. If that transition fails, revert the DMG batch on main and ship a
-new ZIP patch; never replace published assets. Enable release immutability
-only after these checks pass. Uploads and retries may alter drafts only;
-published releases have no asset-mutation path.
+machine-wide settings. A change to the update format also needs Check for
+Updates tested from the last release in the old format, through a
+successful restart — 1.1.8's ZIP to 1.1.9's DMG was that transition. If it
+fails, revert the batch on main and ship a new patch in the old format;
+never replace published assets. Enable release immutability only after
+these checks pass. Uploads and retries may alter drafts only; published
+releases have no asset-mutation path.
 
 ## Recovery
 
@@ -185,6 +186,13 @@ days. It does not push that feed or publish the archive; the publication
 job stays skipped. This exercises `SURequireSignedFeed` before a release
 can offer a build that requires it.
 
+The feed is signed whole, so its header comment cannot be edited on
+`main` between releases: one changed byte and every Corta that checks the
+feed's signature refuses it. Before signing, both the rehearsal and
+`appcast.yml` run `scripts/appcast-header.py`, which repoints any path the
+comment names that has since moved (`Corta/UpdateController.swift`, now
+under `Corta/App/`) and fails the run if the file is gone or ambiguous.
+
 ## The signing secrets
 
 `release.yml` signs with the Developer ID Application certificate and
@@ -229,7 +237,7 @@ keychain that the job deletes.
    ```
 
    `ASC_ISSUER_ID` only changes if the team does.
-3. Rehearse (below). Once it passes, **Revoke** the old key in App Store
+3. Rehearse (*Validation*, above). Once it passes, **Revoke** the old key in App Store
    Connect. Revoking a key stops nothing that already shipped.
 
 **Replacing the certificate**, before it expires (the current one runs

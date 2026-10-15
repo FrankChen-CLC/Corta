@@ -14,6 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+import CortaPOSIX
 import Darwin
 import Dispatch
 import Foundation
@@ -50,7 +51,7 @@ public enum SFTPTransportError: Error, Equatable {
 
     /// Pure, so the policy is testable. Only 255 is ssh's own error (`ssh(1)`);
     /// any other exit or signal is a broken channel.
-    public static func classify(exit: SFTPProcessExit, diagnostics: String) -> SFTPTransportError {
+    public static func classify(exit: ProcessExit, diagnostics: String) -> SFTPTransportError {
         guard case .exited(let code) = exit else {
             return .connectionLost
         }
@@ -122,13 +123,12 @@ public final class SFTPSubprocessChannel: SFTPChannelTransport, @unchecked Senda
     }
 
     public let processIdentifier: pid_t
-    public let host: String
 
     private let stdinWrite: GuardedDescriptor
     private let stdoutRead: GuardedDescriptor
 
     private struct State {
-        var exit: SFTPProcessExit?
+        var exit: ProcessExit?
         var isReaping = false
         var isClosed = false
     }
@@ -150,13 +150,11 @@ public final class SFTPSubprocessChannel: SFTPChannelTransport, @unchecked Senda
         return String(decoding: data, as: UTF8.self)
     }
 
-    public var exitStatus: SFTPProcessExit? { state.withLock { $0.exit } }
-
     /// Bounded, and for diagnostics only: turns a bare `.connectionLost` into
     /// the classification `classify(exit:)` gives. Never disturbs a live child.
-    public func awaitExit(timeout: Duration = .seconds(2)) -> SFTPProcessExit? {
+    public func awaitExit(timeout: Duration = .seconds(2)) -> ProcessExit? {
         let deadline = ContinuousClock.now + timeout
-        var exit: SFTPProcessExit?
+        var exit: ProcessExit?
         while true {
             if exit == nil { exit = reap(blocking: false) }
             // Both the exit and stderr's EOF.
@@ -183,6 +181,43 @@ public final class SFTPSubprocessChannel: SFTPChannelTransport, @unchecked Senda
         // second time): `posix_spawn` reports a failed exec itself, and an
         // inherited pipe would lose close-on-exec — ssh would hold it open and the
         // parent's read would never return.
+        let (stdinPipe, stdoutPipe, stderrPipe) = try makeStandardPipes()
+        let childArguments = [executable] + (arguments ?? Self.arguments(host: host))
+        let spawned = launch(
+            executable, arguments: childArguments, environment: environment,
+            stdio: (stdinPipe[0], stdoutPipe[1], stderrPipe[1]), suspended: beforeStart != nil)
+        Darwin.close(stdinPipe[0])
+        Darwin.close(stdoutPipe[1])
+        Darwin.close(stderrPipe[1])
+        // The parent's ends stay out of every other child — a shell spawned
+        // later must not be able to write frames into this stream, or hold
+        // ssh's stdin open past `close()`.
+        for fd in [stdinPipe[1], stdoutPipe[0], stderrPipe[0]] {
+            _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
+        }
+        let pid: pid_t
+        switch spawned {
+        case .success(let spawnedPID):
+            pid = spawnedPID
+        case .failure(let error):
+            Darwin.close(stdinPipe[1])
+            Darwin.close(stdoutPipe[0])
+            Darwin.close(stderrPipe[0])
+            throw .spawnFailed(code: error.code)
+        }
+
+        if let beforeStart {
+            beforeStart(pid)
+            kill(pid, SIGCONT)
+        }
+        return SFTPSubprocessChannel(
+            pid: pid,
+            stdinWrite: stdinPipe[1], stdoutRead: stdoutPipe[0],
+            stderrRead: stderrPipe[0])
+    }
+
+    /// stdin, stdout and stderr pipes for the child, all or none.
+    private static func makeStandardPipes() throws(SFTPTransportError) -> ([Int32], [Int32], [Int32]) {
         var stdinPipe: [Int32] = [0, 0]
         var stdoutPipe: [Int32] = [0, 0]
         var stderrPipe: [Int32] = [0, 0]
@@ -196,13 +231,21 @@ public final class SFTPSubprocessChannel: SFTPChannelTransport, @unchecked Senda
             }
             throw .spawnFailed(code: code)
         }
+        return (stdinPipe, stdoutPipe, stderrPipe)
+    }
 
+    /// `posix_spawn`s the child on `stdio`; `suspended` holds it before its
+    /// first instruction. The pid, or `posix_spawn`'s error.
+    private static func launch(
+        _ executable: String, arguments childArguments: [String], environment: [String: String],
+        stdio: (input: Int32, output: Int32, error: Int32), suspended: Bool
+    ) -> Result<pid_t, SpawnErrorCode> {
         var fileActions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&fileActions)
         defer { posix_spawn_file_actions_destroy(&fileActions) }
-        posix_spawn_file_actions_adddup2(&fileActions, stdinPipe[0], 0)
-        posix_spawn_file_actions_adddup2(&fileActions, stdoutPipe[1], 1)
-        posix_spawn_file_actions_adddup2(&fileActions, stderrPipe[1], 2)
+        posix_spawn_file_actions_adddup2(&fileActions, stdio.input, 0)
+        posix_spawn_file_actions_adddup2(&fileActions, stdio.output, 1)
+        posix_spawn_file_actions_adddup2(&fileActions, stdio.error, 2)
 
         var attributes: posix_spawnattr_t?
         posix_spawnattr_init(&attributes)
@@ -215,54 +258,27 @@ public final class SFTPSubprocessChannel: SFTPChannelTransport, @unchecked Senda
             &attributes,
             Int16(POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGDEF
                 | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSID
-                | (beforeStart == nil ? 0 : POSIX_SPAWN_START_SUSPENDED)))
-        var allSignals = sigset_t()
-        sigfillset(&allSignals)
-        posix_spawnattr_setsigdefault(&attributes, &allSignals)
-        var noSignals = sigset_t()
-        sigemptyset(&noSignals)
-        posix_spawnattr_setsigmask(&attributes, &noSignals)
+                | (suspended ? POSIX_SPAWN_START_SUSPENDED : 0)))
+        resetSignals(of: &attributes)
 
-        let argv0 = executable
-        let childArguments = [argv0] + (arguments ?? Self.arguments(host: host))
         let environmentLines = environment.map { "\($0.key)=\($0.value)" }.sorted()
 
         var pid: pid_t = 0
-        let spawnResult = withSFTPStringArray(childArguments) { argv in
-            withSFTPStringArray(environmentLines) { envp in
+        let spawnResult = withCStringArray(childArguments) { argv in
+            withCStringArray(environmentLines) { envp in
                 posix_spawn(&pid, executable, &fileActions, &attributes, argv, envp)
             }
         }
-        Darwin.close(stdinPipe[0])
-        Darwin.close(stdoutPipe[1])
-        Darwin.close(stderrPipe[1])
-        // The parent's ends stay out of every other child — a shell spawned
-        // later must not be able to write frames into this stream, or hold
-        // ssh's stdin open past `close()`.
-        for fd in [stdinPipe[1], stdoutPipe[0], stderrPipe[0]] {
-            _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
-        }
-        guard spawnResult == 0 else {
-            Darwin.close(stdinPipe[1])
-            Darwin.close(stdoutPipe[0])
-            Darwin.close(stderrPipe[0])
-            throw .spawnFailed(code: spawnResult)
-        }
-
-        if let beforeStart {
-            beforeStart(pid)
-            kill(pid, SIGCONT)
-        }
-        let channel = SFTPSubprocessChannel(
-            pid: pid, host: host,
-            stdinWrite: stdinPipe[1], stdoutRead: stdoutPipe[0],
-            stderrRead: stderrPipe[0])
-        return channel
+        return spawnResult == 0 ? .success(pid) : .failure(SpawnErrorCode(code: spawnResult))
     }
 
-    private init(pid: pid_t, host: String, stdinWrite: Int32, stdoutRead: Int32, stderrRead: Int32) {
+    /// `posix_spawn`'s error number, as a `Result` failure.
+    private struct SpawnErrorCode: Error {
+        let code: Int32
+    }
+
+    private init(pid: pid_t, stdinWrite: Int32, stdoutRead: Int32, stderrRead: Int32) {
         self.processIdentifier = pid
-        self.host = host
         self.stdinWrite = GuardedDescriptor(stdinWrite)
         self.stdoutRead = GuardedDescriptor(stdoutRead)
         // EPIPE, never SIGPIPE: its default action kills the whole app.
@@ -383,7 +399,7 @@ public final class SFTPSubprocessChannel: SFTPChannelTransport, @unchecked Senda
 
     /// Only one `waitpid` ever runs for this child, as in `PTY.reap`.
     @discardableResult
-    private func reap(blocking: Bool) -> SFTPProcessExit? {
+    private func reap(blocking: Bool) -> ProcessExit? {
         let shouldReap = state.withLock { state -> Bool in
             if state.exit != nil || state.isReaping { return false }
             state.isReaping = true
@@ -408,24 +424,11 @@ public final class SFTPSubprocessChannel: SFTPChannelTransport, @unchecked Senda
             state.withLock { $0.isReaping = false }
             return state.withLock { $0.exit }
         }
-        let exit = SFTPProcessExit(waitpidStatus: status)
+        let exit = ProcessExit(waitpidStatus: status)
         state.withLock {
             $0.exit = exit
             $0.isReaping = false
         }
         return exit
-    }
-}
-
-/// A null-terminated `char *[]`, valid for `body`.
-private func withSFTPStringArray<Result>(
-    _ strings: [String],
-    _ body: (UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> Result
-) -> Result {
-    var pointers = strings.map { strdup($0) }
-    pointers.append(nil)
-    defer { for pointer in pointers { free(pointer) } }
-    return pointers.withUnsafeMutableBufferPointer { buffer in
-        body(buffer.baseAddress!)
     }
 }

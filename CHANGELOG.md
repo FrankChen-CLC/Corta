@@ -10,13 +10,44 @@ Versioning for compatibility changes.
 
 ## [Unreleased]
 
+### Changed
+
+- Building a frame's instances takes a third or more less CPU when the whole
+  screen changes: the per-cell reads of the terminal core and the glyph
+  cache's ASCII hits are inlined. Text joined by combining marks, emoji
+  modifiers or flag pairs no longer allocates per character as it arrives.
+
+### Removed
+
+- Directory-history favourites. Nothing in the app could ever mark a
+  directory as one, so the history now ranks by frecency alone; a history
+  file that still carries the old flag loads as before.
+- The experimental per-window render thread (`CORTA_RENDER_THREAD=1`), which
+  was off by default and never shown to save power. Every window renders on
+  the main thread, as it always has by default.
+
 ### Fixed
 
+- After a crash, restored tabs keep the tab that was selected and the names
+  given to them: switching or renaming a tab now saves the arrangement, as
+  moving or resizing a window already did.
+- A pane no longer risks drawing its whole session in a fallback font
+  with no letters when macOS's font service hiccups as the pane opens: the
+  terminal font's fallback list is applied to the font already loaded
+  instead of looking the font up again.
+- A split's focus ring, and the settings rows' status icons, follow
+  Increase Contrast when it is switched while Corta runs, instead of
+  keeping the width and colour they had until the focus next moved.
 - The `cd` directory-completion hint takes its colour from the theme —
   built-in or defined in the config file — instead of the system label
   colour, which drew the alternatives almost black on a dark theme while
   macOS itself was in Light mode. A theme change recolours a hint already
   showing, and Increase Contrast strengthens it.
+- The user guide and configuration reference no longer promise a directory
+  switcher: directory history is recorded and can be cleared in Settings,
+  but nothing in the app lists it yet. Troubleshooting entries that had
+  drifted below "Going back to your old terminal" are back under their
+  topics, and release-specific notes read as current behaviour.
 
 ## [1.2.1] - 2026-10-14
 

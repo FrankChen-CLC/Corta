@@ -107,7 +107,7 @@ class DiffTests(unittest.TestCase):
         self.assertFalse(self.classify(self.base, base="0" * 40))
 
     def test_scripts_assets_workflows_and_unknown_paths_run_full_ci(self):
-        for path in ("docs/brand/compose-screenshot.swift", "docs/brand/image.png",
+        for path in ("scripts/brand/compose-screenshot.swift", "docs/brand/image.png",
                      ".github/workflows/ci.yml", "appcast.xml", "Package.resolved",
                      "Corta/README.md", "unknown.md"):
             with self.subTest(path=path):
@@ -210,6 +210,8 @@ class CodeQLBaselineTests(DiffTests):
             ".github/workflows/codeql.yml": set(ci.LANGUAGES),
             "scripts/codeql-extract.py": set(ci.LANGUAGES),
             "Corta.xcodeproj/project.pbxproj": {"swift", "c-cpp"},
+            ".xcode-version": {"swift", "c-cpp"},
+            ".github/actions/select-xcode/action.yml": {"swift", "c-cpp", "actions"},
             "CortaTerminal/Package.resolved": {"swift", "c-cpp"},
             "docs/TESTING.md": set(),
             "appcast.xml": set(),

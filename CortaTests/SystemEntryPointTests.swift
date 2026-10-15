@@ -18,7 +18,7 @@ import AppKit
 import Carbon.HIToolbox
 import Testing
 import Synchronization
-import CortaTerminal
+import CortaPOSIX
 
 @testable import Corta
 

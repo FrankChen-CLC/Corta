@@ -40,19 +40,6 @@ import Testing
 @Suite(.serialized) struct FontOptionsTests {
     private static func makeDevice() -> MTLDevice? { MTLCreateSystemDefaultDevice() }
 
-    /// Programming faces people actually ask for, then the monospaced
-    /// families macOS itself ships that are *not* the default, so the
-    /// end-to-end case has something to run on any machine.
-    private static let thirdPartyCandidates = [
-        "Fira Code", "JetBrains Mono", "Cascadia Code", "IBM Plex Mono",
-        "Source Code Pro", "Hack", "Iosevka", "Andale Mono", "PT Mono",
-    ]
-
-    private static func installedCandidate() -> String? {
-        let installed = Set(NSFontManager.shared.availableFontFamilies)
-        return thirdPartyCandidates.first { installed.contains($0) }
-    }
-
     /// Whether the font subsystem can currently hand back a usable face for
     /// `family` at all — a face, and glyphs for ASCII.
     ///
@@ -90,6 +77,23 @@ import Testing
         let line = CTLineCreateWithAttributedString(attributed)
         let runs = (CTLineGetGlyphRuns(line) as? [CTRun]) ?? []
         return runs.reduce(0) { $0 + CTRunGetGlyphCount($1) }
+    }
+
+    /// Pinning the cascade keeps the face it was given — size, shear and
+    /// all — and adds only the fallbacks.
+    @Test func pinningTheCascadeKeepsTheFace() {
+        let base = NSFont.monospacedSystemFont(ofSize: 24, weight: .medium) as CTFont
+        var shear = CGAffineTransform(a: 1, b: 0, c: 0.21, d: 1, tx: 0, ty: 0)
+        let oblique = CTFontCreateCopyWithAttributes(base, 0, &shear, nil)
+        let pinned = TerminalFont.pinningCascadeList(oblique, size: 18)
+        #expect(CTFontCopyPostScriptName(pinned) == CTFontCopyPostScriptName(base))
+        #expect(CTFontGetSize(pinned) == 18)
+        #expect(CTFontGetMatrix(pinned) == shear)
+        let cascade = CTFontCopyAttribute(pinned, kCTFontCascadeListAttribute) as? [CTFontDescriptor]
+        #expect(cascade?.count == 2)
+        var equals: UniChar = 0x3D
+        var glyph = CGGlyph(0)
+        #expect(CTFontGetGlyphsForCharacters(pinned, &equals, &glyph, 1))
     }
 
     // MARK: - Ligatures

@@ -214,8 +214,8 @@ justified here: a full array copy is a sub-millisecond `memcpy`
 
 ## 5. Benchmarks
 
-Because the terminal core is a separate SwiftPM package (`DESIGN.md`
-§2.2), all of these run without launching the app.
+Because the terminal core is a separate SwiftPM package (`DECISIONS.md`
+D04), the core benchmarks run without launching the app.
 
 | Benchmark                              | Measures                              |
 | -------------------------------------- | ------------------------------------- |
@@ -320,8 +320,8 @@ The host runs macOS 27.0 (26A428). Results and diagnostics are recorded in
 the [dated verification record](https://github.com/noah-qin/Corta/blob/f632d5918653cc2feee28fe1baa0c0fd01e93c0e/docs/test-results/2026-09-19-issues-88-90.md).
 
 **The pin and the measurement are deliberately two different toolchains.**
-`XCODE_PIN` — 26.6.0 in `ci.yml`, `nightly.yml`, `release.yml`,
-`render.yml` and `codeql.yml`, which move together — is what compiles the binary users run.
+`.xcode-version` — 26.6.0, which every workflow selects — is what compiles
+the binary users run.
 The numbers in this document come from the machine above and whatever
 toolchain it has, currently Xcode 27.0. There is no standard GitHub-hosted
 runner with Xcode 27 (`macos-27` is not a label; the `xcode-27` image is a
@@ -348,7 +348,7 @@ claim that it used a different toolchain.
 
 An end-to-end number says whether the last change helped. It cannot say
 *where* the time goes, and each stage has a different fix — so the whole
-chain emits `os_signpost` intervals (`Corta/InputLatencySignposts.swift`),
+chain emits `os_signpost` intervals (`Corta/TerminalView/InputLatencySignposts.swift`),
 subsystem `dev.noahqin.Corta`, category `input-latency`:
 
 | Signpost  | Covers                                              |
@@ -472,7 +472,7 @@ Pair it with a signpost trace: if double buffering is costing rather than
 saving, it appears as the `frame` interval growing at its front.
 
 **Preliminary signal, not the A/B itself.** `RenderMetrics`
-(`Corta/RenderMetrics.swift`, `CORTA_RENDER_METRICS=1`) reports
+(`Corta/TerminalView/RenderMetrics.swift`, `CORTA_RENDER_METRICS=1`) reports
 `drawableWait` — how long
 `nextDrawable()` blocks — directly, without Instruments. One
 informal run at the default drawable count (3), auto-repeat plus `yes`
@@ -561,16 +561,6 @@ Throughput (vtebench ms per 1 MiB sample, lower is faster; `cat` in MiB/s):
 
 ### 5.6 Numbers by release
 
-The 2026-10-11 same-M5/toolchain optimization run measures 100k history
-RSS increment **185 → 11.4 MiB** (maintained ingestion), CJK feed median
-**70.8 → 87.4 MiB/s**, and AI ANSI feed **123.3 → 133.7 MiB/s**.
-The Unicode driver measures five samples after one warmup. ASCII feed
-**345.2 → 340.3 MiB/s** has overlapping ranges; it is not an unqualified
-speedup. Warm ASCII history search is approximately **25.6 → 20.8 ms**;
-first-query setup is slower (**27.2 → 44.7 ms**).
-[The dated record](https://github.com/noah-qin/Corta/blob/f632d5918653cc2feee28fe1baa0c0fd01e93c0e/docs/test-results/2026-10-11-memory-core-optimization.md)
-provides corpora, distributions, stage gates and verification limits.
-
 One column per release, on the machine §5.2 records. A cell says *not
 re-measured* rather than carrying an older figure forward. Each release's
 full run — machine state, every scenario, the energy tables and the
@@ -621,71 +611,21 @@ but it includes the GPU's round trip (§5.8); the CPU-only rebuild, 0.13–0.15
 ms at 1.1.0, is the comparison, and it did not move. Every scripted core
 figure is inside the 1.0.0–1.1.1 range or better than it.
 
+**Since 1.1.5 no release has had a whole-table run.** 1.2.0's changes were
+measured one batch at a time, each before/after on the same M5 and
+toolchain: scrolling and throughput in §5.14, memory and the core in §5.15,
+full screen in §5.17, the instance build in §5.19. The 2026-10-11 memory
+and core run, for instance, measures the 100k-line history's resident
+increment at **185 → 11.4 MiB** (maintained ingestion), the CJK feed median
+at **70.8 → 87.4 MiB/s** and the AI ANSI feed at **123.3 → 133.7 MiB/s**,
+each five samples after one warmup. The ASCII feed, **345.2 → 340.3
+MiB/s**, has overlapping ranges and is not a speedup. Warm ASCII history
+search is about **25.6 → 20.8 ms**, while first-query setup is slower
+(**27.2 → 44.7 ms**).
+[The dated record](https://github.com/noah-qin/Corta/blob/f632d5918653cc2feee28fe1baa0c0fd01e93c0e/docs/test-results/2026-10-11-memory-core-optimization.md)
+has the corpora, distributions, stage gates and verification limits.
+
 ### 5.7 Keypress → glass, measured from inside the app
-
-**October 9 follow-up (#280, #282).** Correlated diagnostics now record
-keypress→output, echo→main, main→frame and frame→actual glass, alongside
-`wakeHop`, callback target lead, first-after-resume lead, resume→callback,
-actual-target presentation slip and delivered `frameInterval`. Timing is
-conditional on metrics being enabled. Requested ranges are recorded as
-requests, not evidence of delivered refresh.
-
-Three alternating same-binary rounds on the built-in 60 Hz panel, AC and Low
-Power Mode off, give DisplayLink p50 **83.75–84.12 ms** and opt-in on-demand
-p50 **33.94–34.21 ms**, with lower p95/p99. Three Typometer rounds confirm the
-direction: **54.81–56.37 ms → 22.26–24.12 ms**. Internal and external gains
-differ by about one frame; the old calibration offset is not reused. Human
-rounds were subsequently recorded on reported battery power; these are supplemental, not verified mains acceptance. #279's external baseline is now closed.
-
-The first resumed callback has approximately the same 49.9 ms target lead as
-steady callbacks; resume→callback is approximately 16.4 ms. No additional
-first-tick penalty was observed, so no hold-awake was added. The mixed
-CAMetalDisplayLink/nextDrawable prototype trapped twice and was removed; the
-opt-in experiment uses separate CADisplayLink pacing and only bypasses pacing
-for paused-link echoes within 50 ms of input, rate-limited to one refresh.
-**DisplayLink stays the default:** three alternating flood rounds show higher experimental tails, so the promotion
-gate fails. Verified-mains human driver pairs later give median p50 **68.85 → 39.39 ms**
-with every paired p95/p99 lower; full visual/tearing acceptance is still pending; scripted power-mode pairs are recorded below.
-
-[Full environment, decomposition, raw rounds and acceptance limits](https://github.com/noah-qin/Corta/blob/f632d5918653cc2feee28fe1baa0c0fd01e93c0e/docs/test-results/2026-10-09-input-followup.md)
-also record final full Unit, D17, idle/occluded Activity Monitor counters and
-valid Allocations evidence. No 120 Hz panel was available. Idle process CPU
-was approximately 0.03%. A later explicit PTY close wakeup removes the 250 ms
-reader poll: input-then-idle interrupt wakeups fall from 4.7974/s to about
-0.4–0.55/s, with zero render commits/frame callbacks over 20 seconds. Total
-process wakeups are still not strictly zero; raw controls are linked above.
-
-Typing, committed IME text, selector commands, accepted paste and reported
-mouse input now request an interactive rate for a re-armed one-second grace.
-The pure policy overrides serious thermal pressure, Low Power Mode and window
-inactivity during interaction. Critical pressure still caps at 20 Hz, including
-scroll gestures (a change from their former precedence). Above 60 Hz the
-interactive range explicitly prefers the screen maximum; non-interactive
-output prefers 60 Hz with the screen maximum as its ceiling. Screen-change
-notifications reapply the policy. The scheduler still parks at idle; the grace
-does not wake it or re-present unchanged frames.
-
-Three scripted power-mode pairs (October 9–10, shipping DisplayLink driver)
-measure low-power p50 medians **186.64 → 64.08 ms** and normal-mode medians
-**108.48 → 107.23 ms**. Low-power target-interval p50/p99 is 16.67/16.67 ms.
-XCTest input cadence differs by power mode. Later three human mains pairs
-per power mode (current PTY-wakeup build) give normal p50 medians
-**68.32 → 69.02 ms**, low-power **184.54 → 68.33 ms**. Current normal
-first-pair p99 175.47 ms exceeds old max 169.47 ms; mixed key content and
-prelaunched inactive processes limit the result. Energy/visual acceptance
-and the full raw distributions remain in the linked record. No 120 Hz result or energy equivalence is inferred
-from policy tests.
-
-
-The [later authorized foreground retry](https://github.com/noah-qin/Corta/blob/f632d5918653cc2feee28fe1baa0c0fd01e93c0e/docs/test-results/2026-10-10-foreground-followup.md)
-fixes directory-preview overlap with real Pinyin preedit. Three further
-default-driver four-pane pairs still fail GPU tails: old p99 0.80/0.50/1.42
-ms versus current 1.05/2.80/1.73 ms. CPU/wakeup energy proxies do not
-increase in the recorded stable windows, but are not watts. System Trace
-confirms a 27.127-second blocked reader; process wakeups remain about
-0.45/s, and disabling diagnostics still gives about 0.60/s. The user did
-not observe the continuous animation, so physical temporal tearing remains
-unconfirmed. No experimental default or acceptance completion is claimed.
 
 A third-party screen-capture tool — one that grabs the window in a loop
 until the pixels change — can measure keypress to glass, but Corta
@@ -775,6 +715,69 @@ a person's — the default and 2 are one setting, yet their p99 differ by
 48 ms, since at 200 samples p99 is the second-slowest keystroke — and
 not something to choose a value by.
 
+**October 9 follow-up (#280, #282).** Correlated diagnostics now record
+keypress→output, echo→main, main→frame and frame→actual glass, alongside
+`wakeHop`, callback target lead, first-after-resume lead, resume→callback,
+actual-target presentation slip and delivered `frameInterval`. Timing is
+conditional on metrics being enabled. Requested ranges are recorded as
+requests, not evidence of delivered refresh.
+
+Three alternating same-binary rounds on the built-in 60 Hz panel, AC and Low
+Power Mode off, give DisplayLink p50 **83.75–84.12 ms** and opt-in on-demand
+p50 **33.94–34.21 ms**, with lower p95/p99. Three Typometer rounds confirm the
+direction: **54.81–56.37 ms → 22.26–24.12 ms**. Internal and external gains
+differ by about one frame; the old calibration offset is not reused. Human
+rounds were subsequently recorded on reported battery power; these are supplemental, not verified mains acceptance. #279's external baseline is now closed.
+
+The first resumed callback has approximately the same 49.9 ms target lead as
+steady callbacks; resume→callback is approximately 16.4 ms. No additional
+first-tick penalty was observed, so no hold-awake was added. The mixed
+CAMetalDisplayLink/nextDrawable prototype trapped twice and was removed; the
+opt-in experiment uses separate CADisplayLink pacing and only bypasses pacing
+for paused-link echoes within 50 ms of input, rate-limited to one refresh.
+**DisplayLink stays the default:** three alternating flood rounds show higher experimental tails, so the promotion
+gate fails. Verified-mains human driver pairs later give median p50 **68.85 → 39.39 ms**
+with every paired p95/p99 lower; full visual/tearing acceptance is still pending; scripted power-mode pairs are recorded below.
+
+[Full environment, decomposition, raw rounds and acceptance limits](https://github.com/noah-qin/Corta/blob/f632d5918653cc2feee28fe1baa0c0fd01e93c0e/docs/test-results/2026-10-09-input-followup.md)
+also record final full Unit, D17, idle/occluded Activity Monitor counters and
+valid Allocations evidence. No 120 Hz panel was available. Idle process CPU
+was approximately 0.03%. A later explicit PTY close wakeup removes the 250 ms
+reader poll: input-then-idle interrupt wakeups fall from 4.7974/s to about
+0.4–0.55/s, with zero render commits/frame callbacks over 20 seconds. Total
+process wakeups are still not strictly zero; raw controls are linked above.
+
+Typing, committed IME text, selector commands, accepted paste and reported
+mouse input now request an interactive rate for a re-armed one-second grace.
+The pure policy overrides serious thermal pressure, Low Power Mode and window
+inactivity during interaction. Critical pressure still caps at 20 Hz, including
+scroll gestures (a change from their former precedence). Above 60 Hz the
+interactive range explicitly prefers the screen maximum; non-interactive
+output prefers 60 Hz with the screen maximum as its ceiling. Screen-change
+notifications reapply the policy. The scheduler still parks at idle; the grace
+does not wake it or re-present unchanged frames.
+
+Three scripted power-mode pairs (October 9–10, shipping DisplayLink driver)
+measure low-power p50 medians **186.64 → 64.08 ms** and normal-mode medians
+**108.48 → 107.23 ms**. Low-power target-interval p50/p99 is 16.67/16.67 ms.
+XCTest input cadence differs by power mode. Later three human mains pairs
+per power mode (current PTY-wakeup build) give normal p50 medians
+**68.32 → 69.02 ms**, low-power **184.54 → 68.33 ms**. Current normal
+first-pair p99 175.47 ms exceeds old max 169.47 ms; mixed key content and
+prelaunched inactive processes limit the result. Energy/visual acceptance
+and the full raw distributions remain in the linked record. No 120 Hz result or energy equivalence is inferred
+from policy tests.
+
+The [later authorized foreground retry](https://github.com/noah-qin/Corta/blob/f632d5918653cc2feee28fe1baa0c0fd01e93c0e/docs/test-results/2026-10-10-foreground-followup.md)
+fixes directory-preview overlap with real Pinyin preedit. Three further
+default-driver four-pane pairs still fail GPU tails: old p99 0.80/0.50/1.42
+ms versus current 1.05/2.80/1.73 ms. CPU/wakeup energy proxies do not
+increase in the recorded stable windows, but are not watts. System Trace
+confirms a 27.127-second blocked reader; process wakeups remain about
+0.45/s, and disabling diagnostics still gives about 0.60/s. The user did
+not observe the continuous animation, so physical temporal tearing remains
+unconfirmed. No experimental default or acceptance completion is claimed.
+
 ### 5.8 The frame-CPU baseline, under Release (D17)
 
 D17's number is a Release number. One command produces it:
@@ -797,6 +800,12 @@ number exists to see — and so reaches only what the renderer declares
 `public`. Every report names the configuration it was built in: the same
 plan under the scheme's default configuration is a Debug run, and says
 `Debug, -Onone` on its first line.
+
+Until 2026-10-14 none of the three test plans turned coverage off, and
+Xcode reads a missing `codeCoverage` as on: this plan's build compiled the
+app and both libraries with `-profile-generate`, so every frame-CPU figure
+up to §5.17 includes coverage counters. They compare with each other — both
+sides of each A/B carried them — but not with figures from §5.19 on.
 
 `CORTA_BASELINE_OUTPUT`, `CORTA_UPLOAD_OUTPUT` and
 `CORTA_CONSTRUCTION_OUTPUT` move the three reports, which default to
@@ -881,7 +890,6 @@ completion outside it, because a frame slot is released only when its
 previous frame completes. A warm backend costs 0.06 ms per pane where
 `QuadRenderer` cost nothing: each pane's backend owns its own queue,
 command buffers, allocators and residency set.
-
 
 ### 5.9 A snapshot's lifetime (#111)
 
@@ -1097,93 +1105,6 @@ and the benchmark's screen carries no marks.
 
 Apple M5, macOS 27.0.1 (26A434), Xcode 27.0 (27A266a), on mains power.
 
-## Follow-up performance checks
-
-ASCII queries now retain a cell-based path for Unicode scalars whose case
-folding cannot match ASCII; combining/format scalars and ASCII folds retain
-the full Unicode matching path. Reflow reserves row capacity and reuses scratch
-cell/row-start arrays across logical lines. Search generation is checked
-before any status mutation. These changes require Unicode/coordinate and
-reflow regression tests as well as measurements; code changes alone do not
-establish a speedup.
-
-The original October 1 figures (mixed-history search p50 763 ms / p99
-1,293 ms, reflow 223 ms) ran alongside builds and are observations rather
-than stable comparative baselines. A 924 MB peak for the long benchmark
-process is not proof of an application leak. Repeat A/B measurements with
-one machine/toolchain and no concurrent builds; record traces and remaining
-limits in the [follow-up record](https://github.com/noah-qin/Corta/blob/f632d5918653cc2feee28fe1baa0c0fd01e93c0e/docs/test-results/2026-10-02-follow-up.md).
-
-**The A/B, 2026-10-02.** `origin/main` (`0af9fa9`) against the follow-up
-branch, alternating, on a quiet machine — no build or sanitizer run beside
-them. `corta-bench` release build, two rounds each:
-
-| Benchmark | main | follow-up |
-| --- | --- | --- |
-| Reflow, 100k lines, 120 → 80 columns | 92.7 / 92.3 ms | 48.1 / 48.4 ms |
-| Search, 100k lines, ASCII scrollback, warmed p50 | 25.7 / 25.1 ms | 25.5 / 25.8 ms |
-| Search, 100k lines, non-ASCII scrollback, ASCII query, p50 | 450.9 / 449.1 ms | 27.4 / 27.6 ms |
-
-The D17 plan (`-testPlan Release -configuration Benchmark`), three rounds
-each, after the palette moved behind a lock read once per frame (§ the
-follow-up record):
-
-| Figure | main | follow-up |
-| --- | --- | --- |
-| Frame CPU, avg (§5.8) | 0.913 / 0.871 / 0.840 ms | 0.850 / 0.875 / 0.767 ms |
-| Full rebuild, p50 | 0.130 / 0.146 / 0.180 ms | 0.132 / 0.157 / 0.152 ms |
-| Typing (one row), p50 | 0.023 / 0.023 / 0.023 ms | 0.022 / 0.022 / 0.023 ms |
-
-The render figures are inside each other's spread: no change to the frame
-path is measurable. Apple silicon MacBook Air, macOS 27.0.1, Xcode 27.0
-(27A266a), on the same machine and toolchain for both sides.
-
-### Cursor settings verification (2026-10-04)
-
-On the Apple M5 MacBook Air with Xcode 27.0 and macOS 27.0.1, the Release
-frame-CPU baseline after adding optional cursor blinking measured **0.562 ms
-average / 0.821 ms p95** (120×40, Menlo 14 at 1×, 60 iterations). This is a
-post-change measurement, without a paired pre-change comparison. See the
-[verification record](https://github.com/noah-qin/Corta/blob/f632d5918653cc2feee28fe1baa0c0fd01e93c0e/docs/test-results/2026-10-04-cursor-window.md) for scope and
-limits; blink-enabled idle CPU was not separately measured.
-
-### Input-source indicator follow-up, 2026-10-04
-
-On the same Apple M5 host, macOS 27.0.1 and Xcode 27.0 (27A266a), the
-Release plan's three renderer tests passed. One 60-iteration 120×40
-full-screen run measured **0.858 ms average, 3.017 ms p95**. Instance-upload
-p50 / p95: typing **0.026 / 0.061 ms**, scroll **0.028 / 0.056 ms**, full
-rebuild **0.153 / 0.174 ms**. This working tree also includes the cursor
-and window-settings changes above; this is not an isolated A/B result.
-
-The offscreen renderer baseline excludes native AppKit overlays. The badge
-uses input-source notifications and the existing output/focus redraws; it
-adds no polling timer. Native-overlay idle CPU and keypress latency were not
-separately measured. Live UI checks cover input-source switching, long input,
-scrollback, command execution and alternate-screen hiding.
-
-### System-status and theme-editor completion, 2026-10-04
-
-The final Release renderer check on the same Apple M5 host passed all three
-performance tests: **0.656 ms average / 2.310 ms p95**, 60 frames, 120×40,
-Menlo 14 at 1×. Instance upload p50/p95: typing **0.020 / 0.047 ms**, scroll
-**0.023 / 0.041 ms**, full rebuild **0.157 / 0.175 ms**. This is an offscreen
-post-change measurement including the earlier working-tree changes; native
-status-bar UI and idle CPU were not separately measured. See the
-[completion record](https://github.com/noah-qin/Corta/blob/f632d5918653cc2feee28fe1baa0c0fd01e93c0e/docs/test-results/2026-10-04-system-status-theme-editor.md).
-
-### Terminal recovery verification (#228, 2026-10-06)
-
-Three alternating Release runs against main `a4883ab` on the Apple M5 host
-(macOS 27.0.1, Xcode 27.0) measured frame round-trip averages of
-0.800 / 0.698 / 0.684 ms before and 0.816 / 0.793 / 0.724 ms after.
-CPU-only full-rebuild p50 was 0.137 / 0.156 / 0.151 ms before and
-0.143 / 0.142 / 0.146 ms after. The round-trip averages trend higher with
-overlapping ranges; the CPU-only ranges overlap. These offscreen measurements
-exclude the AppKit completion tracker and failure UI. See the
-[repair verification record](https://github.com/noah-qin/Corta/blob/f632d5918653cc2feee28fe1baa0c0fd01e93c0e/docs/test-results/2026-10-06-issue-228-fix.md) for all
-three performance workloads, interactive recovery checks and scope limits.
-
 ### 5.14 Scrolling without per-line screen allocation (#281, #283)
 
 October 9, 2026: Apple M5 MacBook Air (Mac17,3), 32 GB; macOS 27.0.1
@@ -1267,23 +1188,21 @@ The SIMD parser differential test has a scalar `advance` reference and
 random feed boundaries. `CORTA_DIFFERENTIAL_CASES=1000000 swift test
 --package-path CortaTerminal --filter ParserSIMDTests` runs the acceptance load.
 The four-pane 400×120 CPU gate has one render target per pane. GPU cell
-expansion remains dependent on #284; these pre-dependency figures do not
-approve that stage. Row-relative instance positions and shared ASCII atlases
-failed their benefit gates and were not adopted.
-
+expansion depended on #284's render thread, which was removed (D04), so
+that stage was never taken; these figures do not approve it. Row-relative
+instance positions and shared ASCII atlases failed their benefit gates and
+were not adopted.
 
 ### 5.16 Shared images, render ownership and idle energy (#291/#284/#290, 2026-10-11)
 
 [Implementation, measurements and acceptance limits](https://github.com/noah-qin/Corta/blob/f632d5918653cc2feee28fe1baa0c0fd01e93c0e/docs/test-results/2026-10-11-render-image-energy.md)
 record three large-image decode/texture rounds, full-UV sampling, reader QoS
 throughput/backpressure, real cursor handoffs and a stalled rendering A/B.
-The render thread remains opt-in. The
+The opt-in render thread's
 [final validation](https://github.com/noah-qin/Corta/blob/f632d5918653cc2feee28fe1baa0c0fd01e93c0e/docs/test-results/2026-10-11-render-final-validation.md)
-supersedes the earlier failed latency gate with corrected echo attribution and
-quiet scheduling: the final steady/stalled A/B p50/p95/p99 improved, and
-1/2/4-pane flood interval p99 was 16.67 ms on the 60 Hz display. CPU-energy
-and complete hardware adoption criteria remain unverified, so
-`CORTA_RENDER_THREAD=1` is not approved for default use.
+improved the steady and stalled A/B p50/p95/p99 and held 1/2/4-pane flood
+interval p99 at 16.67 ms on the 60 Hz display, but never showed a power
+saving; it was removed on 2026-10-14 (DECISIONS D04).
 The unchanged helper sandbox now receives an inherited
 anonymous mapping and emits only an eight-byte header. The
 [follow-up measurements](https://github.com/noah-qin/Corta/blob/f632d5918653cc2feee28fe1baa0c0fd01e93c0e/docs/test-results/2026-10-11-followup.md) record actual
@@ -1320,3 +1239,63 @@ battery, alternated). The
 [record](https://github.com/noah-qin/Corta/blob/f632d5918653cc2feee28fe1baa0c0fd01e93c0e/docs/test-results/2026-10-13-direct-fullscreen.md) has the method (Metal
 System Trace's *Direct to Display* column), the probe that isolated the
 Metal 4 blocker, every run and what was not verified.
+
+### 5.18 Search and reflow without per-cell work (2026-10-02)
+
+An ASCII query keeps a cell-based path for scalars whose case folding
+cannot match ASCII; combining and format scalars, and ASCII folds, keep the
+full Unicode match. Reflow reserves row capacity and reuses its scratch
+cell and row-start arrays across logical lines. `corta-bench`, release, two
+alternating rounds each against `main` (`0af9fa9`), no build beside them:
+
+| Benchmark | main | change |
+| --- | --- | --- |
+| Reflow, 100k lines, 120 → 80 columns | 92.7 / 92.3 ms | 48.1 / 48.4 ms |
+| Search, 100k lines, ASCII scrollback, warmed p50 | 25.7 / 25.1 ms | 25.5 / 25.8 ms |
+| Search, 100k lines, non-ASCII scrollback, ASCII query, p50 | 450.9 / 449.1 ms | 27.4 / 27.6 ms |
+
+The frame path did not move (D17 averages 0.840–0.913 ms on both sides).
+Apple silicon MacBook Air, macOS 27.0.1, Xcode 27.0 (27A266a).
+
+### 5.19 Coverage off, inlined cell reads, allocation-free clusters (2026-10-14)
+
+Three changes, measured together against the tree before them with
+coverage already off on both sides (§5.8):
+
+- **No coverage counters.** The test plans set `codeCoverage` false.
+- **The renderer's cell reads inline.** The app builds the core as a
+  module of its own without cross-module optimisation, so the per-cell loop
+  called `Line`'s subscript and `count` and an addressor for every
+  `CellAttributes` flag it tested — about ten calls a cell. Those members are
+  `@inlinable`, the ASCII glyph hit is an inlined load from a table in a
+  `let` buffer (no exclusivity check, no prologue), and the instance arrays
+  are `ContiguousArray`.
+- **A grown grapheme cluster is found without building its array**
+  (`GraphemeTable.intern(extending:base:with:)`): steady emoji, flag and
+  accent output allocated about twice per combining scalar.
+
+`InstanceUploadBenchmarkTests`, CPU-only p50, three alternating Benchmark
+rounds on the M5 Air (macOS 27.0.1, Xcode 27.0), the machine otherwise in
+use:
+
+| Scenario | Before | After |
+| --- | --- | --- |
+| Full rebuild | 0.067–0.074 ms | 0.037–0.050 ms |
+| Every row redrawn | 0.058–0.064 ms | 0.036–0.041 ms |
+| Full rebuild, block elements | 0.063–0.065 ms | 0.058–0.059 ms |
+| Typing (one row) | 0.011–0.016 ms | 0.011–0.017 ms |
+
+D17's average, which waits on the GPU, stayed inside its spread
+(0.327–0.396 ms before, 0.273–0.351 ms after). Splitting the renderer's long
+methods afterwards measured within noise of this (full rebuild p50
+0.036–0.041 ms on both sides).
+
+Two tests now hold the allocation figures the M6 work found by hand:
+`HotPathAllocationTests` (core, `-c release` in CI) requires zero heap
+allocations from parse to grid for ASCII, SGR, cursor and erase sequences,
+wide text and grapheme clusters, and only arena growth when scrolling into
+history; `RenderAllocationTests` (Release plan) requires a frame's
+allocation count not to grow with damage. Metal's own bookkeeping makes
+that count drift between 17 and 20 a frame, so the check allows 16 over the
+idle frame — one allocation per row would add 40.
+

@@ -15,11 +15,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import CortaSFTP
-import CortaTerminal
 import Foundation
 import Testing
-
-@testable import Corta
 
 /// The shared SFTP test support: a fake `SFTPClient` that answers in
 /// the model's terms and records what it was asked, plus the small helpers
@@ -222,9 +219,9 @@ final class FakeSFTPClient: SFTPClient, @unchecked Sendable {
             }
         } else {
             progress?(
-                .init(filesCompleted: 1, filesTotal: 2, completedBytes: 100, totalBytes: 300, currentFile: "b"))
+                .init(filesCompleted: 1, filesTotal: 2, completedBytes: 100, totalBytes: 300))
             progress?(
-                .init(filesCompleted: 2, filesTotal: 2, completedBytes: 300, totalBytes: 300, currentFile: ""))
+                .init(filesCompleted: 2, filesTotal: 2, completedBytes: 300, totalBytes: 300))
         }
         return SFTPTransferEngine.DirectoryTransferReceipt(
             filesTransferred: 2, directoriesCreated: 1, bytesTransferred: 300, skipped: [])
@@ -259,9 +256,9 @@ func waitUntil(
     // A passing wait returns the moment the condition holds; the ceiling
     // only decides how long a failing one takes to say so, and scales on CI
     // like every other wait in this target (`testTimeoutScale`).
-    let deadline = ContinuousClock.now + .seconds(15) * testTimeoutScale
+    let deadline = SuspendingClock.now + .seconds(15) * testTimeoutScale
     while !condition() {
-        if ContinuousClock.now > deadline {
+        if SuspendingClock.now > deadline {
             Issue.record("timed out waiting for \(description)", sourceLocation: sourceLocation)
             return
         }

@@ -65,9 +65,9 @@ files only when you choose Install. If an installed integration is outdated,
 choose Update and open a new shell. See the
 [shell-integration guide](docs/USER-GUIDE.md#shell-integration) for details.
 
-## 1.2: built for speed
+## Built for speed
 
-Corta 1.2 makes a big leap in speed and efficiency: more than double the
+Corta 1.2 made a big leap in speed and efficiency: more than double the
 core throughput, a frame less of full-screen input latency, and a fraction
 of the memory for long histories. Measured on one Apple M5 MacBook Air,
 before and after, with the same toolchain:
@@ -213,8 +213,8 @@ through every feature and where to find it.
 
 ## Build and test
 
-Use macOS 26.0 or later on Apple silicon and Xcode with Swift 6.2 or later. CI's exact Xcode
-pin is recorded in [the workflow](.github/workflows/ci.yml). The app resolves
+Use macOS 26.0 or later on Apple silicon and Xcode with Swift 6.2 or later. The exact
+Xcode CI and releases build with is in [`.xcode-version`](.xcode-version). The app resolves
 Sparkle on its first build; the terminal core has no external packages.
 
 ```sh

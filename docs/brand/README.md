@@ -17,19 +17,20 @@ repository root.
 | `input-source-long-command.png` | Right-edge badge moved below a long command, without changing the grid |
 | `directory-suggestions.png` | Local zsh suggestions and command-status marks from an isolated UI-test demo shell |
 | `about.png`                 | About with separated links (development build)                   |
-| `compose-screenshot.swift`  | Adds the shadow, margin and poster type to a window capture      |
 | `social-preview.png`        | GitHub social preview card, 1280 × 640                            |
-| `social-preview.swift`      | Renders the card above                                           |
 
-## The README animation
+The two scripts that make these images live in `scripts/brand/`:
+`compose-screenshot.swift` adds the shadow, margin and poster type to a
+window capture, and `social-preview.swift` renders the social preview card.
 
-```html
+## The mascot animation
+
 <p align="center">
   <img src="corta-pangolin-loop.gif" width="240" alt="Corta pangolin mascot breathing while its cursor-like tail tip blinks">
 </p>
-```
 
-The loop is intentionally subtle: the curled pangolin breathes and floats by a
+The animated counterpart of `corta-pangolin-mascot.png`, for pages that can
+show motion; the project README keeps the still. The loop is intentionally subtle: the curled pangolin breathes and floats by a
 few pixels while the cyan cursor at the tip of its tail pulses. It is 360 x 360
 pixels and designed to remain legible when displayed at 180–240 pixels wide.
 
@@ -41,8 +42,8 @@ install. Run it from the repository root; the mascot is loaded by a relative
 path.
 
 ```sh
-swift docs/brand/social-preview.swift docs/brand/social-preview.png light
-swift docs/brand/social-preview.swift /tmp/dark.png dark
+swift scripts/brand/social-preview.swift docs/brand/social-preview.png light
+swift scripts/brand/social-preview.swift /tmp/dark.png dark
 ```
 
 The card is uploaded by hand: repository **Settings** ▸ **General** ▸
@@ -91,7 +92,7 @@ touched:
   (`key code 33 using command down`), and text goes in by pasting.
 
 ```sh
-swiftc -O docs/brand/compose-screenshot.swift -o /tmp/compose
+swiftc -O scripts/brand/compose-screenshot.swift -o /tmp/compose
 /tmp/compose plain window.png docs/brand/screenshot.png
 /tmp/compose overlay window.png palette.png 350 184 with-palette.png
 /tmp/compose poster with-palette.png card.png "Every command, one search away" "⇧⌘P opens the command palette"

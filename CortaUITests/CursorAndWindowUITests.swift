@@ -20,7 +20,7 @@ import XCTest
 final class CursorAndWindowUITests: XCTestCase {
     @MainActor func testOversizedWindowsAndRestorationFitVisibleScreen() throws {
         continueAfterFailure = false
-        let stage = try preparedStage("cursor-oversized")
+        let stage = try UIFixtures.stage("cursor-oversized")
         let app = makeApp(stage: stage)
         app.launch()
         defer { app.terminate() }
@@ -38,7 +38,7 @@ final class CursorAndWindowUITests: XCTestCase {
 
     @MainActor func testCursorSettingsPersistAndBlinkInLiveWindow() throws {
         continueAfterFailure = false
-        let stage = try preparedStage("cursor-blink")
+        let stage = try UIFixtures.stage("cursor-blink")
         let app = makeApp(stage: stage)
         app.launch()
         defer { app.terminate() }
@@ -85,13 +85,11 @@ final class CursorAndWindowUITests: XCTestCase {
 
     @MainActor func testIdleCursorStopsAppFramesAfterHandoff() throws {
         continueAfterFailure = false
-        let stage = try preparedStage("cursor-blink")
+        let stage = try UIFixtures.stage("cursor-blink")
         let app = makeApp(stage: stage)
         let metrics = stage.appendingPathComponent("cursor-idle-\(UUID().uuidString).log")
         app.launchEnvironment["CORTA_RENDER_METRICS"] = metrics.path
         app.launchEnvironment["CORTA_RENDER_METRICS_FRAMES"] = "1"
-        app.launchEnvironment["CORTA_RENDER_THREAD"] =
-            ProcessInfo.processInfo.environment["CORTA_RENDER_THREAD"] ?? "0"
         app.launch()
         defer { app.terminate() }
         XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 10))
@@ -112,18 +110,6 @@ final class CursorAndWindowUITests: XCTestCase {
         add(attachment)
     }
 
-    /// The stage `stage-ui-fixtures.sh` prepared for `name`: the sandboxed
-    /// runner cannot write one the app could read.
-    private func preparedStage(_ name: String) throws -> URL {
-        guard let root = ProcessInfo.processInfo.environment["CORTA_UI_FIXTURES"] else {
-            throw XCTSkip(
-                "Set TEST_RUNNER_CORTA_UI_FIXTURES using CortaUITests/stage-ui-fixtures.sh; the runner's sandbox cannot write a stage the app can read.")
-        }
-        let stage = URL(fileURLWithPath: root, isDirectory: true).appendingPathComponent(name)
-        guard FileManager.default.fileExists(atPath: stage.appendingPathComponent("config").path)
-        else { throw XCTSkip("stage-ui-fixtures.sh made no stage named \(name)") }
-        return stage
-    }
 
     @MainActor private func makeApp(stage: URL) -> XCUIApplication {
         let app = XCUIApplication()
@@ -131,8 +117,6 @@ final class CursorAndWindowUITests: XCTestCase {
         app.launchEnvironment["CORTA_STAGE_DIR"] = stage.path
         app.launchEnvironment["ZDOTDIR"] = stage.path
         app.launchEnvironment["SHELL"] = "/bin/zsh"
-        app.launchEnvironment["CORTA_RENDER_THREAD"] =
-            ProcessInfo.processInfo.environment["CORTA_RENDER_THREAD"] ?? "0"
         return app
     }
 

@@ -20,7 +20,6 @@ import CortaTerminal
 import Foundation
 import Metal
 import Synchronization
-import simd
 
 /// A document position; negative rows are scrollback. Never a viewport row:
 /// scrolling translates, it does not move the selection.
@@ -55,25 +54,6 @@ public nonisolated struct TerminalSelection: Equatable, Sendable {
 /// imports the app without `@testable`, because `-enable-testing` inhibits
 /// the optimisation its Release figure exists to measure (#110).
 public nonisolated final class TerminalRenderer: @unchecked Sendable {
-    // Frames own renderer mutations on the window render thread. Main-thread
-    // font commands serialize with complete frames; geometry reads use a mailbox.
-    // Main constructs an immutable font command; the window render thread
-    // consumes it between complete frames. CTFont exposes no mutable state.
-    // The window render thread produces an immutable CGImage; main consumes
-    // it as a Core Animation layer's contents after the presented callback.
-    private struct CursorCapture: @unchecked Sendable {
-        let image: CGImage
-        let column: Int
-        let columns: Int
-    }
-    private struct FontCommand: @unchecked Sendable {
-        let font: CTFont
-        let scale: CGFloat
-    }
-    private struct Owner: Sendable { weak var thread: RenderThread? }
-    private let renderOwner = Mutex(Owner())
-    func setRenderOwner(_ thread: RenderThread?) { renderOwner.withLock { $0.thread = thread } }
-
     private let access = NSRecursiveLock()
     func withExclusiveAccess<T>(_ body: () throws -> T) rethrows -> T {
         access.lock()
@@ -88,7 +68,7 @@ public nonisolated final class TerminalRenderer: @unchecked Sendable {
     private var retiredBackends: [Metal4Backend] = []
     /// The idle cursor's one-cell captures, kept: a queue and its frame
     /// slots per capture was a fresh allocation every time a cursor parked.
-    private var captureBackend: Metal4Backend?
+    var captureBackend: Metal4Backend?
     let glyphAtlas: GlyphAtlas
     private struct Geometry: Sendable {
         var metrics: CellMetrics
@@ -96,7 +76,7 @@ public nonisolated final class TerminalRenderer: @unchecked Sendable {
         var scale: CGFloat
     }
     private let geometry: Mutex<Geometry>
-    private var metricsValue: CellMetrics
+    var metricsValue: CellMetrics
     /// Its own texture cache: images share no eviction policy with glyphs.
     let kittyImageRenderer: KittyImageRenderer
     /// Cached because `draw` takes no `Grid`.
@@ -107,19 +87,19 @@ public nonisolated final class TerminalRenderer: @unchecked Sendable {
     /// Earliest time this cached grid could contain an echo. Set before snapshotting,
     /// never at submission: output may arrive while older instances are encoded.
     var echoSnapshotAt: TimeInterval?
-    private var cachedLines: [Line] = []
+    var cachedLines: [Line] = []
     /// Live-screen fast path only; meaningless for rows rebuilt in history.
-    private var cachedRevisions: [UInt64] = []
-    private var backgroundCounts: [Int] = []
-    private var glyphCounts: [Int] = []
-    private var colorGlyphCounts: [Int] = []
-    private var cachedBackground: [QuadInstance] = []
-    private var cachedGlyphs: [QuadInstance] = []
+    var cachedRevisions: [UInt64] = []
+    var backgroundCounts: [Int] = []
+    var glyphCounts: [Int] = []
+    var colorGlyphCounts: [Int] = []
+    var cachedBackground: ContiguousArray<QuadInstance> = []
+    var cachedGlyphs: ContiguousArray<QuadInstance> = []
     /// Their own pass: the coverage pipeline reduces emoji to a silhouette.
-    private var cachedColorGlyphs: [QuadInstance] = []
-    private var overlayCount = 0
+    var cachedColorGlyphs: ContiguousArray<QuadInstance> = []
+    var overlayCount = 0
     private var cachedColumns = 0
-    private var cachedOffset = -1
+    var cachedOffset = -1
     /// Not `.count`: a full ring would look unscrolled and leave stale quads.
     private var cachedScrollbackTotalPushed = -1
     /// A swapped-in `ScreenLines` restarts revisions; see its `generation`.
@@ -127,12 +107,12 @@ public nonisolated final class TerminalRenderer: @unchecked Sendable {
     /// An OSC 4 change alters what an index resolves to, invisible to every
     /// other check.
     private var cachedIndexedOverridesGeneration: UInt64 = 0
-    private var indexedOverrides: IndexedColorOverrides = [:]
+    var indexedOverrides: IndexedColorOverrides = [:]
     /// Journal sequence within cachedLinesGeneration, replayed in order.
-    private var cachedScrollEventsTotal: UInt64 = 0
-    private var cachedDocumentTop = 0
+    var cachedScrollEventsTotal: UInt64 = 0
+    var cachedDocumentTop = 0
     /// Newly exposed history rows must rebuild even when their value is blank.
-    private var invalidRows: [Bool] = []
+    var invalidRows: [Bool] = []
     private var cachedCursor: Cursor?
     private var cachedCursorStyle: CursorStyle?
     private var cachedCursorVisible = false
@@ -158,29 +138,29 @@ public nonisolated final class TerminalRenderer: @unchecked Sendable {
     /// screen only. It lives in the row instances, so a row is stale when
     /// the cursor enters or leaves it, or when a scroll shift carries a
     /// baked cursor to another row.
-    private struct BlockCursor: Equatable {
+    struct BlockCursor: Equatable {
         var row: Int
         var column: Int
     }
-    private var blockCursor: BlockCursor?
+    var blockCursor: BlockCursor?
     /// Rows the damage pass rebuilds whatever their revision says: the
     /// block cursor's old and new rows. -1 is none; two `Int`s, not a set,
     /// so the per-row test allocates nothing.
-    private var forcedRowA = -1
-    private var forcedRowB = -1
+    var forcedRowA = -1
+    var forcedRowB = -1
 
     /// Reused, so a damaged row allocates nothing: every damaged row's new
     /// instances, back to back, with where each row's are.
-    private var rowBackground: [QuadInstance] = []
-    private var rowGlyphs: [QuadInstance] = []
-    private var rowColorGlyphs: [QuadInstance] = []
-    private var rebuiltRows: [RebuiltRow] = []
+    var rowBackground: ContiguousArray<QuadInstance> = []
+    var rowGlyphs: ContiguousArray<QuadInstance> = []
+    var rowColorGlyphs: ContiguousArray<QuadInstance> = []
+    var rebuiltRows: [RebuiltRow] = []
     /// The next cache while a splice builds it, then the old one's storage.
-    private var spliceBuffer: [QuadInstance] = []
+    var spliceBuffer: ContiguousArray<QuadInstance> = []
 
     /// One damaged row: its instances in the row scratch arrays, and where
     /// its old ones start in the cache.
-    private struct RebuiltRow {
+    struct RebuiltRow {
         var row: Int
         var background: Range<Int>
         var glyphs: Range<Int>
@@ -189,16 +169,16 @@ public nonisolated final class TerminalRenderer: @unchecked Sendable {
         var cachedGlyphStart: Int
         var cachedColorGlyphStart: Int
     }
-    private var overlayScratch: [QuadInstance] = []
+    var overlayScratch: ContiguousArray<QuadInstance> = []
 
     /// One test rejects nearly every cell.
-    private static let ruleAttributes: CellAttributes = [.underline, .strikethrough, .invisible]
+    static let ruleAttributes: CellAttributes = [.underline, .strikethrough, .invisible]
 
     /// Secondary but readable on dark and light; zero is `invisible`'s job.
-    private static let dimAlpha: Float = 0.55
-    private static let colorAttributeMask = CellAttributes.reverse.rawValue | CellAttributes.dim.rawValue
+    static let dimAlpha: Float = 0.55
+    static let colorAttributeMask = CellAttributes.reverse.rawValue | CellAttributes.dim.rawValue
 
-    private(set) var lastRebuiltRowCount = 0
+    var lastRebuiltRowCount = 0
 
     /// This renderer's theme, instead of the live one (`TerminalColorPalette`).
     /// For tests: the live palette is process-wide, and a suite that pinned it
@@ -208,9 +188,9 @@ public nonisolated final class TerminalRenderer: @unchecked Sendable {
     /// The theme this frame's rows are built with, read once per
     /// `updateInstances` — one lock on the shared palette per frame rather
     /// than per row, and no frame half in one theme and half in the next.
-    private var framePalette: Theme.Variant = Theme.corta.dark
+    var framePalette: Theme.Variant = Theme.corta.dark
     /// `framePalette`'s derived colours, worked out once per frame.
-    private var frameOverlay = Theme.corta.dark.overlayColors
+    var frameOverlay = Theme.corta.dark.overlayColors
     /// The command-status rules beside prompts (`command-status-marks`).
     /// Drawn in this pass, in the left margin, so a rule shows the frame's
     /// own rows: drawn by AppKit they led the text by a frame or two and took
@@ -220,7 +200,7 @@ public nonisolated final class TerminalRenderer: @unchecked Sendable {
     }
     /// The rules, in the margin rect's space (`markRect`); rebuilt when the
     /// rows are, or when `drawsCommandMarks` changes.
-    private var cachedMarks: [QuadInstance] = []
+    var cachedMarks: ContiguousArray<QuadInstance> = []
     private var marksAreStale = true
 
     /// Resource counters used by Release measurement drivers.
@@ -237,21 +217,24 @@ public nonisolated final class TerminalRenderer: @unchecked Sendable {
 
     /// The cached instances — background, glyphs, colour glyphs — so an
     /// incremental build can be compared with a full one.
-    var cachedInstances: [[QuadInstance]] {
+    var cachedInstances: [ContiguousArray<QuadInstance>] {
         [cachedBackground, cachedGlyphs, cachedColorGlyphs]
     }
 
-    private var scaleValue: CGFloat
+    var scaleValue: CGFloat
 
     public var metrics: CellMetrics { geometry.withLock { $0.metrics } }
     var pointMetrics: CellMetrics { geometry.withLock { $0.points } }
     var scale: CGFloat { geometry.withLock { $0.scale } }
 
-    /// - Parameter scale: glyphs rasterise at `size × scale` and `metrics` are
+    /// - Parameter device: a GPU in `MTLGPUFamily.metal4`.
+    /// - Parameter font: the primary font, at its point size.
+    /// - Parameter scaleValue: glyphs rasterise at `size × scale` and `metrics` are
     ///   pixels, the shader's space; 1× on a 2× display rendered half-size and
     ///   soft.
     /// - Parameter atlasPixelSize: small in tests, to exercise eviction;
     ///   `nil` is `GlyphAtlas.atlasSize`.
+    /// - Parameter atlasStorageMode: the atlas texture's storage.
     /// - Throws: `Metal4BackendError.metal4Unsupported` on a GPU without
     ///   `MTLGPUFamily.metal4`. There is no other renderer to fall back to.
     public init(
@@ -284,119 +267,9 @@ public nonisolated final class TerminalRenderer: @unchecked Sendable {
         }
     }
 
-    /// Uses the very same row instances, atlas and Metal shader as the live
-    /// block cursor, including wide glyphs, emoji, rules and box drawing.
-    /// The small offscreen target is read only after GPU completion.
-    func cursorImage(grid: Grid) -> (image: CGImage, column: Int, columns: Int)? {
-        if let owner = renderOwner.withLock({ $0.thread }), !owner.isCurrent {
-            let result = Mutex<CursorCapture?>(nil)
-            owner.barrier { [self] in
-                if let capture = cursorImage(grid: grid) {
-                    result.withLock {
-                        $0 = CursorCapture(
-                            image: capture.image, column: capture.column, columns: capture.columns)
-                    }
-                }
-            }
-            return result.withLock { $0.map { ($0.image, $0.column, $0.columns) } }
-        }
-        return withExclusiveAccess {
-            let row = grid.cursor.row
-            var column = grid.cursor.column
-            guard row >= 0, row < grid.rows, column >= 0, column < grid.columns else { return nil }
-            guard let line = grid.line(atAbsoluteRow: grid.scrollback.totalPushed + row) else {
-                return nil
-            }
-            if column < line.count, line[column].attributes.contains(.wideSpacer), column > 0 {
-                column -= 1
-            }
-            let columns = column < line.count && line[column].attributes.contains(.wide) ? 2 : 1
-            let width = max(1, Int(metricsValue.cellWidth) * columns)
-            let height = max(1, Int(metricsValue.cellHeight))
-            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
-            descriptor.storageMode = .shared
-            descriptor.usage = [.renderTarget, .shaderRead]
-            if captureBackend?.requiresRecovery == true { captureBackend = nil }
-            if captureBackend == nil { captureBackend = try? Metal4Backend(device: backend.device) }
-            guard let target = backend.device.makeTexture(descriptor: descriptor),
-                let capture = captureBackend
-            else { return nil }
-            let previousCursor = blockCursor
-            let previousPalette = framePalette
-            blockCursor = BlockCursor(row: row, column: column)
-            framePalette = themeVariant ?? TerminalColorPalette.activeVariant
-            defer {
-                blockCursor = previousCursor
-                framePalette = previousPalette
-            }
-            var backgrounds: [QuadInstance] = []
-            var glyphs: [QuadInstance] = []
-            var colors: [QuadInstance] = []
-            appendRowInstances(
-                line: line, row: row, graphemes: grid.graphemes,
-                background: &backgrounds, glyphs: &glyphs, colorGlyphs: &colors)
-            let size = CGSize(width: width, height: height)
-            let origin = SIMD2<Float>(
-                Float(column) * Float(metricsValue.cellWidth),
-                Float(row) * Float(metricsValue.cellHeight))
-            for index in backgrounds.indices { backgrounds[index].origin -= origin }
-            for index in glyphs.indices { glyphs[index].origin -= origin }
-            for index in colors.indices { colors[index].origin -= origin }
-            let rect = CGRect(origin: .zero, size: size)
-            let color = framePalette.cursor
-            guard
-                capture.beginFrame(
-                    target: target,
-                    clearColor: MTLClearColorMake(
-                        Double(color.x), Double(color.y), Double(color.z), 1),
-                    label: "Corta.cursor.capture")
-            else { return nil }
-            capture.drawSolidQuads(backgrounds, rect: rect, drawableSize: size)
-            capture.drawGlyphQuads(
-                glyphs, atlas: glyphAtlas.texture, atlasRects: glyphAtlas.atlasRects,
-                atlasRectsVersion: glyphAtlas.atlasRectsVersion,
-                rect: rect, drawableSize: size)
-            capture.drawColorQuads(
-                colors, atlas: glyphAtlas.colorTexture, atlasRects: glyphAtlas.atlasRects,
-                atlasRectsVersion: glyphAtlas.atlasRectsVersion,
-                rect: rect, drawableSize: size)
-            let done = DispatchSemaphore(value: 0)
-            let succeeded = Atomic<Bool>(false)
-            capture.endFrame(presenting: nil) { error in
-                succeeded.store(error == nil, ordering: .releasing)
-                done.signal()
-            }
-            guard done.wait(timeout: .now() + 2) == .success,
-                succeeded.load(ordering: .acquiring)
-            else { return nil }
-            var bytes = [UInt8](repeating: 0, count: width * height * 4)
-            bytes.withUnsafeMutableBytes {
-                target.getBytes(
-                    $0.baseAddress!, bytesPerRow: width * 4,
-                    from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
-            }
-            guard let provider = CGDataProvider(data: Data(bytes) as CFData),
-                let space = CGColorSpace(name: CGColorSpace.sRGB),
-                let image = CGImage(
-                    width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
-                    bytesPerRow: width * 4, space: space,
-                    bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue)
-                        .union(.byteOrder32Little), provider: provider, decode: nil,
-                    shouldInterpolate: false, intent: .defaultIntent)
-            else { return nil }
-            return (image, column, columns)
-        }
-    }
-
     /// Reuses pipelines and texture; a new renderer per keystroke stuttered
     /// under key repeat.
     func setFont(_ font: CTFont, scale newScale: CGFloat) {
-        if let owner = renderOwner.withLock({ $0.thread }), !owner.isCurrent {
-            let command = FontCommand(font: font, scale: newScale)
-            owner.barrier { [self] in setFont(command.font, scale: command.scale) }
-            return
-        }
         access.lock()
         defer { access.unlock() }
         let atlasFont = CTFontCreateCopyWithAttributes(
@@ -413,10 +286,6 @@ public nonisolated final class TerminalRenderer: @unchecked Sendable {
 
     /// For the frame-CPU baseline's worst case.
     public func invalidate() {
-        if let owner = renderOwner.withLock({ $0.thread }), !owner.isCurrent {
-            owner.post { [self] in invalidate() }
-            return
-        }
         access.lock()
         defer { access.unlock() }
         needsFullRebuild = true
@@ -464,47 +333,24 @@ public nonisolated final class TerminalRenderer: @unchecked Sendable {
         framePalette = themeVariant ?? TerminalColorPalette.activeVariant
         frameOverlay = framePalette.overlayColors
         let offset = min(max(0, scrollOffset), grid.scrollback.count)
-        let fullRebuild =
-            needsFullRebuild
-            || cachedLines.count != grid.rows
-            || cachedColumns != grid.columns
-            || cachedLinesGeneration != grid.linesGeneration
-            || (cachedOffset > 0 && cachedDocumentTop < grid.scrollback.totalPushed - grid.scrollback.count)
-            || cachedIndexedOverridesGeneration != indexedOverridesGeneration
+        let fullRebuild = cacheIsStale(for: grid, indexedOverridesGeneration: indexedOverridesGeneration)
 
-        var changed = fullRebuild
-        var rowsChanged = fullRebuild
         let previousBlockCursor = blockCursor
         let isBlock = effectiveCursorStyle == .block || effectiveCursorStyle == .blinkingBlock
         blockCursor =
             isBlock && cursorVisible && offset == 0
             ? BlockCursor(row: grid.cursor.row, column: grid.cursor.column) : nil
-        // An eviction mid-build stales every UV: rebuild once. Content that alone
-        // overflows the atlas draws blank.
         let atlasGeneration = glyphAtlas.generation
-        glyphAtlas.beginFrame(shapingBudget: Self.shapingBudgetPerFrame)
-        if fullRebuild {
-            rebuildAllRows(grid: grid, offset: offset)
-        } else {
-            changed = rebuildDamagedRows(
-                grid: grid, offset: offset, previousBlockCursor: previousBlockCursor)
-            rowsChanged = changed
-        }
-        if glyphAtlas.generation != atlasGeneration {
-            rebuildAllRows(grid: grid, offset: offset)
-            changed = true
-            rowsChanged = true
-        }
+        let rowsChanged = updateRows(
+            grid: grid, offset: offset, fullRebuild: fullRebuild,
+            previousBlockCursor: previousBlockCursor, atlasGeneration: atlasGeneration)
+        var changed = rowsChanged
 
-        if fullRebuild || cachedOffset != offset || !Self.selectionsEqual(cachedSelection, selection)
-            || grid.cursor != cachedCursor || effectiveCursorStyle != cachedCursorStyle
-            || cursorVisible != cachedCursorVisible
-            // Both are anchored to the scrollback, so output moves them.
-            || ((selection != nil || !searchMatches.isEmpty)
-                && cachedScrollbackTotalPushed != grid.scrollback.totalPushed)
-            || cachedSearchMatches != searchMatches
-            || cachedCurrentSearchMatchIndex != currentSearchMatchIndex
-            || !Self.selectionsEqual(cachedHoveredLink, hoveredLink)
+        if fullRebuild
+            || overlayIsStale(
+                grid: grid, offset: offset, cursorStyle: effectiveCursorStyle, cursorVisible: cursorVisible,
+                selection: selection, searchMatches: searchMatches,
+                currentSearchMatchIndex: currentSearchMatchIndex, hoveredLink: hoveredLink)
         {
             rebuildOverlay(
                 grid: grid, cursorStyle: effectiveCursorStyle, cursorVisible: cursorVisible, selection: selection, offset: offset,
@@ -513,38 +359,15 @@ public nonisolated final class TerminalRenderer: @unchecked Sendable {
             changed = true
         }
 
-        cachedColumns = grid.columns
-        cachedOffset = offset
-        cachedScrollbackTotalPushed = grid.scrollback.totalPushed
-        cachedIndexedOverridesGeneration = indexedOverridesGeneration
-        cachedLinesGeneration = grid.linesGeneration
-        cachedScrollEventsTotal = grid.scrollEventsTotal
-        cachedDocumentTop = grid.scrollback.totalPushed - offset
-        // Decodes are scheduled here, never in `draw`; an image delete changes
-        // no cell, so it registers as damage here or not at all.
-        if cachedImagePlacements.revision != grid.imagePlacements.revision {
+        if updateImages(grid: grid, offset: offset) {
             changed = true
         }
-        kittyImageRenderer.update(
-            table: grid.imagePlacements, rows: grid.rows, offset: offset,
-            scrollbackTotalPushed: grid.scrollback.totalPushed,
-            cellWidth: Float(metricsValue.cellWidth), cellHeight: Float(metricsValue.cellHeight))
-        cachedImagePlacements = grid.imagePlacements
-        cachedCursor = grid.cursor
-        cachedCursorStyle = effectiveCursorStyle
-        cachedCursorVisible = cursorVisible
-        cachedSelection = selection
-        cachedSearchMatches = searchMatches
-        cachedCurrentSearchMatchIndex = currentSearchMatchIndex
-        cachedHoveredLink = hoveredLink
-        // Rows that drew without some glyph are rebuilt next frame. Asked for
-        // only while nothing was evicted: past that the content overflows the
-        // atlas, and re-asking would shape a budget's worth every frame for as
-        // long as it stays on screen.
-        needsFullRebuild = glyphAtlas.deferredShaping && glyphAtlas.generation == atlasGeneration
-        if needsFullRebuild {
-            onGlyphsDeferred?()
-        }
+        remember(
+            grid: grid, offset: offset, indexedOverridesGeneration: indexedOverridesGeneration,
+            cursorStyle: effectiveCursorStyle, cursorVisible: cursorVisible, selection: selection,
+            searchMatches: searchMatches, currentSearchMatchIndex: currentSearchMatchIndex,
+            hoveredLink: hoveredLink)
+        requestRebuildForDeferredGlyphs(atlasGeneration: atlasGeneration)
         // Not on a cursor blink or a selection drag: only the rows carry marks.
         if rowsChanged || marksAreStale {
             changed = changed || marksAreStale
@@ -552,6 +375,104 @@ public nonisolated final class TerminalRenderer: @unchecked Sendable {
             marksAreStale = false
         }
         return changed
+    }
+
+    /// Brings the row instances up to date and reports whether any changed.
+    /// An eviction mid-build stales every UV: rebuild once. Content that
+    /// alone overflows the atlas draws blank.
+    private func updateRows(
+        grid: Grid, offset: Int, fullRebuild: Bool, previousBlockCursor: BlockCursor?,
+        atlasGeneration: Int
+    ) -> Bool {
+        glyphAtlas.beginFrame(shapingBudget: Self.shapingBudgetPerFrame)
+        var changed = fullRebuild
+        if fullRebuild {
+            rebuildAllRows(grid: grid, offset: offset)
+        } else {
+            changed = rebuildDamagedRows(
+                grid: grid, offset: offset, previousBlockCursor: previousBlockCursor)
+        }
+        if glyphAtlas.generation != atlasGeneration {
+            rebuildAllRows(grid: grid, offset: offset)
+            changed = true
+        }
+        return changed
+    }
+
+    /// Hands the placements to the image renderer and reports whether they
+    /// changed. Decodes are scheduled here, never in `draw`; an image delete
+    /// changes no cell, so it registers as damage here or not at all.
+    private func updateImages(grid: Grid, offset: Int) -> Bool {
+        let changed = cachedImagePlacements.revision != grid.imagePlacements.revision
+        kittyImageRenderer.update(
+            table: grid.imagePlacements, rows: grid.rows, offset: offset,
+            scrollbackTotalPushed: grid.scrollback.totalPushed,
+            cellHeight: Float(metricsValue.cellHeight))
+        return changed
+    }
+
+    /// Rows that drew without some glyph are rebuilt next frame. Asked for
+    /// only while nothing was evicted: past that the content overflows the
+    /// atlas, and re-asking would shape a budget's worth every frame for as
+    /// long as it stays on screen.
+    private func requestRebuildForDeferredGlyphs(atlasGeneration: Int) {
+        needsFullRebuild = glyphAtlas.deferredShaping && glyphAtlas.generation == atlasGeneration
+        if needsFullRebuild {
+            onGlyphsDeferred?()
+        }
+    }
+
+    /// Whether every row must be rebuilt: the grid's shape or lines were
+    /// replaced, the retained history scrolled out from under the viewport,
+    /// or the palette changed.
+    private func cacheIsStale(for grid: Grid, indexedOverridesGeneration: UInt64) -> Bool {
+        needsFullRebuild
+            || cachedLines.count != grid.rows
+            || cachedColumns != grid.columns
+            || cachedLinesGeneration != grid.linesGeneration
+            || (cachedOffset > 0 && cachedDocumentTop < grid.scrollback.totalPushed - grid.scrollback.count)
+            || cachedIndexedOverridesGeneration != indexedOverridesGeneration
+    }
+
+    /// Whether the cursor, selection, search or link overlay differs from
+    /// the one last built.
+    private func overlayIsStale(
+        grid: Grid, offset: Int, cursorStyle: CursorStyle, cursorVisible: Bool,
+        selection: TerminalSelection?, searchMatches: [TerminalSelection],
+        currentSearchMatchIndex: Int?, hoveredLink: TerminalSelection?
+    ) -> Bool {
+        cachedOffset != offset || !Self.selectionsEqual(cachedSelection, selection)
+            || grid.cursor != cachedCursor || cursorStyle != cachedCursorStyle
+            || cursorVisible != cachedCursorVisible
+            // Both are anchored to the scrollback, so output moves them.
+            || ((selection != nil || !searchMatches.isEmpty)
+                && cachedScrollbackTotalPushed != grid.scrollback.totalPushed)
+            || cachedSearchMatches != searchMatches
+            || cachedCurrentSearchMatchIndex != currentSearchMatchIndex
+            || !Self.selectionsEqual(cachedHoveredLink, hoveredLink)
+    }
+
+    /// What the next frame's diff compares against.
+    private func remember(
+        grid: Grid, offset: Int, indexedOverridesGeneration: UInt64, cursorStyle: CursorStyle,
+        cursorVisible: Bool, selection: TerminalSelection?, searchMatches: [TerminalSelection],
+        currentSearchMatchIndex: Int?, hoveredLink: TerminalSelection?
+    ) {
+        cachedColumns = grid.columns
+        cachedOffset = offset
+        cachedScrollbackTotalPushed = grid.scrollback.totalPushed
+        cachedIndexedOverridesGeneration = indexedOverridesGeneration
+        cachedLinesGeneration = grid.linesGeneration
+        cachedScrollEventsTotal = grid.scrollEventsTotal
+        cachedDocumentTop = grid.scrollback.totalPushed - offset
+        cachedImagePlacements = grid.imagePlacements
+        cachedCursor = grid.cursor
+        cachedCursorStyle = cursorStyle
+        cachedCursorVisible = cursorVisible
+        cachedSelection = selection
+        cachedSearchMatches = searchMatches
+        cachedCurrentSearchMatchIndex = currentSearchMatchIndex
+        cachedHoveredLink = hoveredLink
     }
 
     /// Diff and draw in one call, for tests and benchmarks; the app's loop
@@ -625,663 +546,4 @@ public nonisolated final class TerminalRenderer: @unchecked Sendable {
         return drawing
     }
 
-    private func rebuildAllRows(grid: Grid, offset: Int) {
-        cachedBackground.removeAll(keepingCapacity: true)
-        cachedGlyphs.removeAll(keepingCapacity: true)
-        cachedColorGlyphs.removeAll(keepingCapacity: true)
-        backgroundCounts.removeAll(keepingCapacity: true)
-        glyphCounts.removeAll(keepingCapacity: true)
-        colorGlyphCounts.removeAll(keepingCapacity: true)
-        cachedLines.removeAll(keepingCapacity: true)
-        cachedRevisions.removeAll(keepingCapacity: true)
-        cachedBackground.reserveCapacity(grid.rows * grid.columns / 4 + 2)
-        cachedGlyphs.reserveCapacity(grid.rows * grid.columns / 2)
-        let liveScreen = offset == 0
-        for row in 0..<grid.rows {
-            let line = Self.visibleLine(grid: grid, row: row, offset: offset)
-            let backgroundStart = cachedBackground.count
-            let glyphStart = cachedGlyphs.count
-            let colorGlyphStart = cachedColorGlyphs.count
-            appendRowInstances(
-                line: line, row: row, graphemes: grid.graphemes,
-                background: &cachedBackground, glyphs: &cachedGlyphs,
-                colorGlyphs: &cachedColorGlyphs)
-            backgroundCounts.append(cachedBackground.count - backgroundStart)
-            glyphCounts.append(cachedGlyphs.count - glyphStart)
-            colorGlyphCounts.append(cachedColorGlyphs.count - colorGlyphStart)
-            cachedLines.append(line)
-            cachedRevisions.append(liveScreen ? grid.lineRevision(row) : 0)
-        }
-        overlayCount = 0
-        invalidRows.removeAll(keepingCapacity: true)
-        invalidRows.append(contentsOf: repeatElement(false, count: grid.rows))
-        lastRebuiltRowCount = grid.rows
-    }
-
-    /// Line-granular damage: rebuild only the rows that changed into the
-    /// scratch arrays, then put them in the cache (`place`), so a frame
-    /// that damages every row costs one pass over the cache, not one per
-    /// row.
-    ///
-    /// The live screen (`offset == 0`) is checked with `Grid.lineRevision`,
-    /// a single `UInt64` compare, instead of a full `Line` comparison —
-    /// see the type's doc comment and
-    /// `ScreenLines.swift`. Scrolled into history, rows are immutable
-    /// scrollback storage with no revision to compare. Retained history rows
-    /// compare only their mutable mark; live/history transitions and the live
-    /// portion of a partly scrolled viewport still compare cells by value.
-    private func rebuildDamagedRows(
-        grid: Grid, offset: Int, previousBlockCursor: BlockCursor?
-    ) -> Bool {
-        var backgroundStart = 0
-        var glyphStart = 0
-        var colorGlyphStart = 0
-        let liveScreen = offset == 0
-        var shifted = false
-        var retainedHistoryRows = min(grid.rows, max(0, cachedOffset))
-        var oldCursorRow = previousBlockCursor?.row ?? -1
-        func shift(top: Int, bottom: Int, delta: Int) {
-            applyShift(top: top, bottom: bottom, delta: delta, cellHeight: Float(metricsValue.cellHeight))
-            shifted = true
-            if oldCursorRow >= top && oldCursorRow <= bottom {
-                oldCursorRow -= delta
-                if oldCursorRow < top || oldCursorRow > bottom { oldCursorRow = -1 }
-            }
-        }
-        if liveScreen && cachedOffset == 0 {
-            if grid.scrollEventsTotal >= cachedScrollEventsTotal,
-                grid.scrollEventsTotal - cachedScrollEventsTotal <= UInt64(Grid.scrollEventCapacity) {
-                // A region flood logs a line per event: same region, same
-                // direction, the shifts add up, so each run moves once.
-                var run: (top: Int, bottom: Int, delta: Int)?
-                for sequence in cachedScrollEventsTotal..<grid.scrollEventsTotal {
-                    guard let event = grid.scrollEvent(at: sequence) else { continue }
-                    let next = (top: Int(event.top), bottom: Int(event.bottom), delta: Int(event.delta))
-                    if let pending = run, pending.top == next.top, pending.bottom == next.bottom,
-                        (pending.delta > 0) == (next.delta > 0)
-                    {
-                        run?.delta += next.delta
-                        continue
-                    }
-                    if let pending = run { shift(top: pending.top, bottom: pending.bottom, delta: pending.delta) }
-                    run = next
-                }
-                if let pending = run { shift(top: pending.top, bottom: pending.bottom, delta: pending.delta) }
-            }
-            // Overflow: ordinary revision comparison remains correct; old cached
-            // rows have not moved, so the old cursor also remains in its old row.
-        } else {
-            let delta = grid.scrollback.totalPushed - offset - cachedDocumentTop
-            if delta != 0 {
-                shift(top: 0, bottom: grid.rows - 1, delta: delta)
-                retainedHistoryRows = max(0, min(grid.rows, retainedHistoryRows - delta))
-            }
-        }
-        forcedRowA = -1
-        forcedRowB = -1
-        if previousBlockCursor != blockCursor || shifted {
-            forcedRowA = oldCursorRow
-            forcedRowB = blockCursor?.row ?? -1
-        }
-        rowBackground.removeAll(keepingCapacity: true)
-        rowGlyphs.removeAll(keepingCapacity: true)
-        rowColorGlyphs.removeAll(keepingCapacity: true)
-        rebuiltRows.removeAll(keepingCapacity: true)
-        for row in 0..<grid.rows {
-            let revision = liveScreen ? grid.lineRevision(row) : 0
-            let forced = row == forcedRowA || row == forcedRowB
-            // Retained history cells never change; only marks can be edited.
-            // A formerly live row may have changed before entering history,
-            // so compare that transition by value rather than assuming it froze.
-            let unchangedHistory = !liveScreen && row < offset && row < retainedHistoryRows
-                && !invalidRows[row]
-                && grid.scrollback.mark(at: grid.scrollback.count - offset + row) == cachedLines[row].mark
-            let possiblyChanged = forced || invalidRows[row]
-                || (liveScreen ? revision != cachedRevisions[row] : !unchangedHistory)
-            if possiblyChanged {
-                let line = Self.visibleLine(grid: grid, row: row, offset: offset)
-                if liveScreen || forced || invalidRows[row] || line != cachedLines[row] {
-                    let rebuilt = RebuiltRow(
-                        row: row, background: rowBackground.count..<rowBackground.count,
-                        glyphs: rowGlyphs.count..<rowGlyphs.count,
-                        colorGlyphs: rowColorGlyphs.count..<rowColorGlyphs.count,
-                        cachedBackgroundStart: backgroundStart, cachedGlyphStart: glyphStart,
-                        cachedColorGlyphStart: colorGlyphStart)
-                    appendRowInstances(
-                        line: line, row: row, graphemes: grid.graphemes,
-                        background: &rowBackground, glyphs: &rowGlyphs,
-                        colorGlyphs: &rowColorGlyphs)
-                    var finished = rebuilt
-                    finished.background = rebuilt.background.lowerBound..<rowBackground.count
-                    finished.glyphs = rebuilt.glyphs.lowerBound..<rowGlyphs.count
-                    finished.colorGlyphs = rebuilt.colorGlyphs.lowerBound..<rowColorGlyphs.count
-                    rebuiltRows.append(finished)
-                    cachedLines[row] = line
-                    cachedRevisions[row] = revision
-                    invalidRows[row] = false
-                }
-            }
-            backgroundStart += backgroundCounts[row]
-            glyphStart += glyphCounts[row]
-            colorGlyphStart += colorGlyphCounts[row]
-        }
-        lastRebuiltRowCount = rebuiltRows.count
-        guard !rebuiltRows.isEmpty else { return shifted }
-        place(
-            into: &cachedBackground, counts: &backgroundCounts, from: rowBackground,
-            ranges: \.background, starts: \.cachedBackgroundStart)
-        place(
-            into: &cachedGlyphs, counts: &glyphCounts, from: rowGlyphs, ranges: \.glyphs,
-            starts: \.cachedGlyphStart)
-        place(
-            into: &cachedColorGlyphs, counts: &colorGlyphCounts, from: rowColorGlyphs,
-            ranges: \.colorGlyphs, starts: \.cachedColorGlyphStart)
-        return true
-    }
-
-    /// Puts the rebuilt rows' instances from `scratch` into `cached`, the
-    /// cheaper of two ways. In place, row by row, a row whose count changed
-    /// moves everything after it — nothing for typing, the overlay alone for
-    /// a scroll's new bottom row, but every instance once per row when a
-    /// flood or a redrawing TUI changes them all. Past one array's worth of
-    /// moves, the array is rebuilt in one pass instead: unchanged rows
-    /// copied from the cache, rebuilt ones from `scratch`, then whatever
-    /// follows the rows (the background's overlay). `counts` becomes the
-    /// new per-row counts either way.
-    private func place(
-        into cached: inout [QuadInstance], counts: inout [Int], from scratch: [QuadInstance],
-        ranges: KeyPath<RebuiltRow, Range<Int>>, starts: KeyPath<RebuiltRow, Int>
-    ) {
-        var moves = 0
-        for rebuilt in rebuiltRows where rebuilt[keyPath: ranges].count != counts[rebuilt.row] {
-            moves += cached.count - rebuilt[keyPath: starts] - counts[rebuilt.row]
-        }
-        if moves <= cached.count {
-            var shift = 0
-            for rebuilt in rebuiltRows {
-                let range = rebuilt[keyPath: ranges]
-                let start = rebuilt[keyPath: starts] + shift
-                cached.replaceSubrange(start..<(start + counts[rebuilt.row]), with: scratch[range])
-                shift += range.count - counts[rebuilt.row]
-                counts[rebuilt.row] = range.count
-            }
-            return
-        }
-        spliceBuffer.removeAll(keepingCapacity: true)
-        spliceBuffer.reserveCapacity(cached.count + scratch.count)
-        var source = 0
-        var next = 0
-        for row in counts.indices {
-            let count = counts[row]
-            if next < rebuiltRows.count, rebuiltRows[next].row == row {
-                let range = rebuiltRows[next][keyPath: ranges]
-                spliceBuffer.append(contentsOf: scratch[range])
-                counts[row] = range.count
-                next += 1
-            } else {
-                spliceBuffer.append(contentsOf: cached[source..<(source + count)])
-            }
-            source += count
-        }
-        spliceBuffer.append(contentsOf: cached[source...])
-        swap(&cached, &spliceBuffer)
-    }
-
-    /// Retained instances keep their atlas coordinates and move only in Y.
-    /// Exposed rows are invalidated; overlays outside the region stay fixed.
-    private func applyShift(top: Int, bottom: Int, delta: Int, cellHeight: Float) {
-        guard delta != 0 else { return }
-        let height = bottom - top + 1
-        let count = min(abs(delta), height)
-        let retained = delta > 0 ? (top + count)..<(bottom + 1) : top..<(bottom - count + 1)
-        let shiftY = Float(delta) * cellHeight
-        func moveInstances(_ instances: inout [QuadInstance], counts: inout [Int]) {
-            let regionStart = counts[..<top].reduce(0, +)
-            let regionEnd = regionStart + counts[top...bottom].reduce(0, +)
-            let keptStart = counts[..<retained.lowerBound].reduce(0, +)
-            let keptEnd = keptStart + counts[retained].reduce(0, +)
-            // Delete the discarded ends in place. The overlay tail is outside
-            // regionEnd and never moves in Y, even when its array index changes.
-            instances.removeSubrange(keptEnd..<regionEnd)
-            instances.removeSubrange(regionStart..<keptStart)
-            for i in regionStart..<(regionStart + keptEnd - keptStart) {
-                instances[i].origin.y -= shiftY
-            }
-            if delta > 0 {
-                for row in top..<(bottom - count + 1) { counts[row] = counts[row + count] }
-                for row in (bottom - count + 1)...bottom { counts[row] = 0 }
-            } else {
-                for row in stride(from: bottom, through: top + count, by: -1) { counts[row] = counts[row - count] }
-                for row in top..<(top + count) { counts[row] = 0 }
-            }
-        }
-        moveInstances(&cachedBackground, counts: &backgroundCounts)
-        moveInstances(&cachedGlyphs, counts: &glyphCounts)
-        moveInstances(&cachedColorGlyphs, counts: &colorGlyphCounts)
-        if delta > 0 {
-            for row in top..<(bottom - count + 1) {
-                cachedLines[row] = cachedLines[row + count]
-                cachedRevisions[row] = cachedRevisions[row + count]
-                invalidRows[row] = invalidRows[row + count]
-            }
-        } else {
-            for row in stride(from: bottom, through: top + count, by: -1) {
-                cachedLines[row] = cachedLines[row - count]
-                cachedRevisions[row] = cachedRevisions[row - count]
-                invalidRows[row] = invalidRows[row - count]
-            }
-        }
-        let exposed = delta > 0 ? (bottom - count + 1)...bottom : top...(top + count - 1)
-        for row in exposed {
-            cachedLines[row] = Line()
-            cachedRevisions[row] = .max
-            invalidRows[row] = true
-        }
-    }
-
-    private func rebuildOverlay(
-        grid: Grid, cursorStyle: CursorStyle, cursorVisible: Bool, selection: TerminalSelection?, offset: Int,
-        searchMatches: [TerminalSelection] = [], currentSearchMatchIndex: Int? = nil,
-        hoveredLink: TerminalSelection? = nil
-    ) {
-        let cellWidth = Float(metricsValue.cellWidth)
-        let cellHeight = Float(metricsValue.cellHeight)
-        overlayScratch.removeAll(keepingCapacity: true)
-        if let selection {
-            overlayScratch.append(
-                contentsOf: selectionQuads(
-                    selection, grid: grid, offset: offset, cellWidth: cellWidth, cellHeight: cellHeight,
-                    color: frameOverlay.selection))
-        }
-        // After the selection, before the cursor, which stays on top.
-        for (index, match) in searchMatches.enumerated() {
-            overlayScratch.append(
-                contentsOf: selectionQuads(
-                    match, grid: grid, offset: offset, cellWidth: cellWidth, cellHeight: cellHeight,
-                    color: index == currentSearchMatchIndex
-                        ? frameOverlay.currentSearchMatch : frameOverlay.searchMatch))
-        }
-        // A rule, not a fill: it must read as a link and not fight the
-        // selection.
-        if let hoveredLink {
-            for quad in selectionQuads(
-                hoveredLink, grid: grid, offset: offset, cellWidth: cellWidth,
-                cellHeight: cellHeight, color: frameOverlay.linkUnderline)
-            {
-                let thickness = max(1, Float(scaleValue).rounded(.down))
-                overlayScratch.append(
-                    QuadInstance(
-                        origin: .init(quad.origin.x, quad.origin.y + cellHeight - thickness * 2),
-                        size: .init(quad.size.x, thickness), color: quad.color))
-            }
-        }
-        // A block cursor is drawn by its row (`appendRowInstances`).
-        if cursorVisible, blockCursor == nil {
-            let cellOrigin = SIMD2<Float>(
-                Float(grid.cursor.column) * cellWidth, Float(grid.cursor.row) * cellHeight)
-            // An eighth of a cell, at least 2 device pixels.
-            let stroke = max(2, (cellHeight / 8).rounded(.down))
-            let cursorColor = framePalette.cursor
-            switch cursorStyle {
-            case .block, .blinkingBlock:
-                break  // Only off the live screen, where no cursor is drawn.
-            case .underline, .blinkingUnderline:
-                overlayScratch.append(
-                    QuadInstance(
-                        origin: .init(cellOrigin.x, cellOrigin.y + cellHeight - stroke),
-                        size: .init(cellWidth, stroke), color: cursorColor))
-            case .bar, .blinkingBar:
-                overlayScratch.append(
-                    QuadInstance(
-                        origin: cellOrigin, size: .init(stroke, cellHeight), color: cursorColor))
-            }
-        }
-        let end = cachedBackground.count
-        cachedBackground.replaceSubrange((end - overlayCount)..<end, with: overlayScratch)
-        overlayCount = overlayScratch.count
-    }
-
-    /// The per-cell loop, for damaged rows only. A wide glyph is scaled to fit
-    /// its two-cell box — the CJK fallback font is never exactly two advances
-    /// wide; a side-table cluster is shaped as one run into the same box.
-    private func appendRowInstances(
-        line: Line, row: Int, graphemes: GraphemeTable,
-        background: inout [QuadInstance], glyphs: inout [QuadInstance],
-        colorGlyphs: inout [QuadInstance]
-    ) {
-        let cellWidth = Float(metricsValue.cellWidth)
-        let cellHeight = Float(metricsValue.cellHeight)
-        let baseline = Float(metricsValue.baselineOffset)
-        // Once per row: the property retains the ANSI array on every touch.
-        let palette = framePalette
-        // The block cursor's columns in this row — two under a wide
-        // character, so the whole glyph inverts — or an empty range. Past
-        // the line's stored cells there is no character to invert: one
-        // cursor-coloured cell.
-        var cursorStart = 0
-        var cursorEnd = 0
-        if let blockCursor, blockCursor.row == row {
-            if blockCursor.column < line.count {
-                cursorStart = blockCursor.column
-                cursorEnd = cursorStart + 1
-                let attributes = line[cursorStart].attributes
-                if attributes.contains(.wide) {
-                    cursorEnd += 1
-                } else if attributes.contains(.wideSpacer), cursorStart > 0 {
-                    // On the right half (a CUP or one BS can land there).
-                    cursorStart -= 1
-                }
-            } else {
-                background.append(
-                    QuadInstance(
-                        origin: .init(Float(blockCursor.column) * cellWidth, Float(row) * cellHeight),
-                        size: .init(cellWidth, cellHeight), color: palette.cursor))
-            }
-        }
-        var previousColors = SIMD2<UInt64>(repeating: .max)
-        var fg = SIMD4<Float>.zero
-        var bg = fg
-        var packedFG: UInt32 = 0
-        var packedBG: UInt32 = 0
-        for column in 0..<line.count {
-            let cell = line[column]
-            let attributes = cell.attributes
-            let reversed = attributes.contains(.reverse)
-            let underCursor = column >= cursorStart && column < cursorEnd
-            // The palette is a snapshot for this row. Raw roles, color rendition
-            // bits and cursor coverage fully determine both resolved colors.
-            // Compare two integer words instead of eight Float lanes per cell.
-            let colors = SIMD2<UInt64>(
-                UInt64(cell.foreground.rawValue) << 32 | UInt64(cell.background.rawValue),
-                UInt64(attributes.rawValue & Self.colorAttributeMask) << 1 | (underCursor ? 1 : 0))
-            if colors != previousColors {
-                previousColors = colors
-                // Resolve roles before reversing: the two default roles differ.
-                let resolvedFg = palette.resolveForeground(cell.foreground, indexedOverrides: indexedOverrides)
-                let resolvedBg = palette.resolveBackground(cell.background, indexedOverrides: indexedOverrides)
-                fg = reversed ? resolvedBg : resolvedFg
-                bg = reversed ? resolvedFg : resolvedBg
-                if attributes.contains(.dim) { fg.w *= Self.dimAlpha }
-                if underCursor { fg = palette.background
-                    bg = palette.cursor }
-                packedFG = QuadInstance.packColor(fg)
-                packedBG = QuadInstance.packColor(bg)
-            }
-            let origin = SIMD2<Float>(Float(column) * cellWidth, Float(row) * cellHeight)
-            if underCursor || !(reversed ? cell.foreground : cell.background).isDefault || reversed {
-                background.append(
-                    QuadInstance(origin: origin, size: .init(cellWidth, cellHeight), rgba: packedBG))
-            }
-
-            // Rules, not glyphs. An OSC 8 link is always underlined — `ls
-            // --hyperlink` sets no rendition. One test for the group.
-            let hasRuleOrHiddenWork =
-                !attributes.isDisjoint(with: Self.ruleAttributes) || !cell.hyperlink.isNone
-            let isInvisible = attributes.contains(.invisible)
-            if hasRuleOrHiddenWork, !isInvisible,
-                attributes.contains(.underline) || !cell.hyperlink.isNone
-            {
-                // A spacer draws it too, so it spans a wide character.
-                let thickness = max(1, Float(scaleValue).rounded(.down))
-                background.append(
-                    QuadInstance(
-                        origin: .init(origin.x, origin.y + baseline + thickness),
-                        size: .init(cellWidth, thickness), color: fg))
-            }
-            if hasRuleOrHiddenWork, !isInvisible, attributes.contains(.strikethrough) {
-                let thickness = max(1, Float(scaleValue).rounded(.down))
-                background.append(
-                    QuadInstance(
-                        // Roughly mid x-height; the real metric is per font.
-                        origin: .init(origin.x, origin.y + baseline * 0.7),
-                        size: .init(cellWidth, thickness), color: fg))
-            }
-
-            guard !isInvisible, !attributes.contains(.wideSpacer) else { continue }
-            // Geometry, not glyphs: glyphs fall short of rounded-up cells and leave
-            // a grid of gaps between block characters (`BlockElements`).
-            if cell.scalar >= 0x2500, cell.scalar <= 0x257F,
-                let pieces = BoxDrawing.pieces(for: cell.scalar, width: cellWidth,
-                                               height: cellHeight, scale: Float(scaleValue)) {
-                // Stroke arms overlap at junctions. Resolve faint text over
-                // its cell background once, so overlap cannot brighten it.
-                let stroke = SIMD4<Float>(
-                    fg.x * fg.w + bg.x * (1 - fg.w),
-                    fg.y * fg.w + bg.y * (1 - fg.w),
-                    fg.z * fg.w + bg.z * (1 - fg.w), 1)
-                for piece in pieces {
-                    background.append(QuadInstance(
-                        origin: .init(origin.x + piece.x, origin.y + piece.y),
-                        size: .init(piece.z, piece.w), color: stroke))
-                }
-                continue
-            }
-            if let pieces = BlockElements.pieces(for: cell.scalar) {
-                for piece in pieces {
-                    background.append(
-                        QuadInstance(
-                            origin: .init(
-                                origin.x + piece.rect.x * cellWidth,
-                                origin.y + piece.rect.y * cellHeight),
-                            size: .init(piece.rect.z * cellWidth, piece.rect.w * cellHeight),
-                            color: .init(fg.x, fg.y, fg.z, fg.w * piece.alpha)))
-                }
-                continue
-            }
-
-            let style = GlyphAtlas.Style(
-                bold: attributes.contains(.bold), italic: attributes.contains(.italic))
-            let isWide = attributes.contains(.wide)
-            let info: GlyphAtlas.GlyphInfo
-            if !cell.grapheme.isNone,
-                let scalars = graphemes.scalars(for: cell.grapheme)
-            {
-                // Even on a space base: a combining mark can attach to one.
-                guard let shaped = glyphAtlas.glyph(forCluster: scalars, style: style)
-                else { continue }
-                info = shaped
-            } else {
-                guard cell.scalar != 0x20, let scalar = Unicode.Scalar(cell.scalar)
-                else { continue }
-                guard
-                    let lookedUp =
-                        scalar.isASCII
-                        ? glyphAtlas.glyph(forASCII: cell.scalar, style: style)
-                        : glyphAtlas.glyph(shaping: cell.scalar, style: style)
-                else { continue }
-                info = lookedUp
-            }
-            // No font covers it: a hollow box, not a silent gap.
-            if info.isMissing {
-                appendMissingGlyphBox(
-                    at: origin, cellWidth: cellWidth * (isWide ? 2 : 1), cellHeight: cellHeight,
-                    color: fg, into: &background)
-                continue
-            }
-            guard info.size != .zero else { continue }
-
-            var glyphOrigin = SIMD2<Float>(
-                origin.x + info.bearing.x,
-                origin.y + baseline - info.bearing.y - info.size.y
-            )
-            var glyphSize = info.size
-            let boxWidth = isWide ? cellWidth * 2 : cellWidth
-            // Fit every glyph's ink to its box, not just wide ones: a bold face a
-            // shade wider, or a font monospaced for letters only, spills into the
-            // next column and nothing clips it. One device pixel of tolerance keeps
-            // ordinary text on the fast path.
-            let ink = info.size.x - 2 * GlyphAtlas.bitmapPadding
-            if info.isColor {
-                let placed = Self.colorGlyphPlacement(
-                    info, cellOrigin: origin, boxWidth: boxWidth, cellHeight: cellHeight)
-                glyphOrigin = placed.origin
-                glyphSize = placed.size
-            } else if isWide || ink > boxWidth + 1 {
-                // Down, never up; centred; the baseline keeps it on the line.
-                let fit = min(1, boxWidth / info.size.x, cellHeight / info.size.y)
-                glyphSize = info.size * fit
-                glyphOrigin = SIMD2<Float>(
-                    origin.x + (boxWidth - glyphSize.x) / 2,
-                    origin.y + baseline - (info.bearing.y + info.size.y) * fit
-                )
-            } else {
-                // Pixel-aligned: sampling at a fractional origin filters Core Text's
-                // antialiasing twice and softens 12pt text.
-                glyphOrigin.x = glyphOrigin.x.rounded()
-                glyphOrigin.y = glyphOrigin.y.rounded()
-            }
-            // Color glyphs go to the color pass; coverage would flatten them.
-            let instance = QuadInstance(origin: glyphOrigin, size: glyphSize, rgba: packedFG, atlasIndex: info.atlasIndex)
-            if info.isColor {
-                colorGlyphs.append(instance)
-            } else {
-                glyphs.append(instance)
-            }
-        }
-    }
-
-    /// Where a color glyph's quad goes in its box. The atlas drew it to fit
-    /// two cells, so in a two-cell box it maps texel for texel; only a box
-    /// the grid narrowed to one cell scales it down. Centred, on whole pixels:
-    /// a bitmap sampled at a fractional origin blurs.
-    static func colorGlyphPlacement(
-        _ info: GlyphAtlas.GlyphInfo, cellOrigin: SIMD2<Float>, boxWidth: Float, cellHeight: Float
-    ) -> (origin: SIMD2<Float>, size: SIMD2<Float>) {
-        let scale = min(1, boxWidth / max(info.size.x, 1), cellHeight / max(info.size.y, 1))
-        let size = info.size * scale
-        return (
-            SIMD2<Float>(
-                (cellOrigin.x + (boxWidth - size.x) / 2).rounded(.down),
-                (cellOrigin.y + (cellHeight - size.y) / 2).rounded(.down)),
-            size
-        )
-    }
-
-    /// Inset so a run of them reads as boxes, not a grid.
-    private func appendMissingGlyphBox(
-        at origin: SIMD2<Float>, cellWidth: Float, cellHeight: Float, color: SIMD4<Float>,
-        into background: inout [QuadInstance]
-    ) {
-        let thickness = max(1, Float(scaleValue).rounded(.down))
-        let inset = max(thickness, (cellWidth * 0.12).rounded())
-        let top = origin.y + max(thickness, (cellHeight * 0.15).rounded())
-        let width = max(thickness * 2, cellWidth - inset * 2)
-        let height = max(thickness * 2, cellHeight - (top - origin.y) * 2)
-        let left = origin.x + inset
-        background.append(
-            QuadInstance(origin: .init(left, top), size: .init(width, thickness), color: color))
-        background.append(
-            QuadInstance(
-                origin: .init(left, top + height - thickness), size: .init(width, thickness),
-                color: color))
-        background.append(
-            QuadInstance(origin: .init(left, top), size: .init(thickness, height), color: color))
-        background.append(
-            QuadInstance(
-                origin: .init(left + width - thickness, top), size: .init(thickness, height),
-                color: color))
-    }
-
-    /// The rule's column (`TerminalLayout.statusRuleOffset`, `Width`), in
-    /// the inset — never over a cell. As tall as the grid.
-    func markRect(beside rect: CGRect) -> CGRect {
-        CGRect(
-            x: rect.minX - TerminalLayout.statusRuleOffset * scaleValue, y: rect.minY,
-            width: TerminalLayout.statusRuleWidth * scaleValue, height: rect.height)
-    }
-
-    /// One rule per prompt row with an outcome, from the rows this frame
-    /// draws: 2 points shorter than the row at each end, so neighbouring
-    /// prompts' rules stay apart. An interruption is the rule split in two
-    /// around its middle — a gap of 4 points.
-    private func rebuildMarks(alternateScreen: Bool) {
-        cachedMarks.removeAll(keepingCapacity: true)
-        guard drawsCommandMarks, !alternateScreen else { return }
-        let cellHeight = Float(metricsValue.cellHeight)
-        let point = Float(scaleValue)
-        let width = Float(TerminalLayout.statusRuleWidth) * point
-        // At least a point, however small the font.
-        let height = max(point, cellHeight - 4 * point)
-        for row in cachedLines.indices {
-            let mark = cachedLines[row].mark
-            guard mark.hasOutcome else { continue }
-            let color = Self.markColor(mark, frameOverlay)
-            let top = Float(row) * cellHeight + 2 * point
-            if mark == .promptInterrupted {
-                let half = max(point, height / 2 - 2 * point)
-                cachedMarks.append(
-                    QuadInstance(origin: .init(0, top), size: .init(width, half), color: color))
-                cachedMarks.append(
-                    QuadInstance(
-                        origin: .init(0, top + height / 2 + 2 * point), size: .init(width, half),
-                        color: color))
-            } else {
-                cachedMarks.append(
-                    QuadInstance(origin: .init(0, top), size: .init(width, height), color: color))
-            }
-        }
-    }
-
-    /// Only an outcome is drawn (the caller's test). A prompt whose command
-    /// has not reported — always the current one — and an output-start row
-    /// carry nothing a reader can use, and after `clear` a grey rule on the
-    /// lone prompt read as a rendering artefact (#165).
-    private static func markColor(_ mark: LineMark, _ overlay: OverlayColors) -> SIMD4<Float> {
-        if mark == .promptInterrupted { return overlay.markInterrupted }
-        return mark == .promptFailed ? overlay.markFailed : overlay.markSucceeded
-    }
-
-    private static func selectionsEqual(_ a: TerminalSelection?, _ b: TerminalSelection?) -> Bool {
-        switch (a, b) {
-        case (nil, nil): return true
-        case let (a?, b?):
-            return a.start == b.start && a.end == b.end
-                && a.baseScrollbackTotal == b.baseScrollbackTotal
-        default: return false
-        }
-    }
-
-    /// Scrollback and the live screen as one contiguous array.
-    private static func visibleLine(grid: Grid, row: Int, offset: Int) -> Line {
-        guard offset > 0 else { return grid.line(row) }
-        let combinedIndex = grid.scrollback.count + row - offset
-        if combinedIndex < grid.scrollback.count {
-            return grid.scrollback[combinedIndex]
-        }
-        return grid.line(combinedIndex - grid.scrollback.count)
-    }
-
-    /// Shifted by scrollback growth since recording, then by the scroll
-    /// offset; rows off screen produce nothing.
-    private func selectionQuads(
-        _ selection: TerminalSelection, grid: Grid, offset: Int, cellWidth: Float, cellHeight: Float,
-        color: SIMD4<Float>
-    ) -> [QuadInstance] {
-        guard selection.start.row <= selection.end.row else { return [] }
-        // `totalPushed`, as the copy path uses — `.count` let the highlight and
-        // the copied text disagree once the ring filled.
-        let firstRow =
-            ScrollbackCoordinates.reanchoredRow(
-                selection.start.row, from: selection.baseScrollbackTotal,
-                to: grid.scrollback.totalPushed) + offset
-        let lastRow =
-            ScrollbackCoordinates.reanchoredRow(
-                selection.end.row, from: selection.baseScrollbackTotal,
-                to: grid.scrollback.totalPushed) + offset
-        guard lastRow >= 0, firstRow < grid.rows else { return [] }
-        var quads: [QuadInstance] = []
-        for row in max(0, firstRow)...min(grid.rows - 1, lastRow) {
-            let startColumn =
-                row == firstRow ? min(max(0, selection.start.column), grid.columns) : 0
-            let endColumn =
-                row == lastRow ? min(max(0, selection.end.column) + 1, grid.columns) : grid.columns
-            guard endColumn > startColumn else { continue }
-            quads.append(
-                QuadInstance(
-                    origin: .init(Float(startColumn) * cellWidth, Float(row) * cellHeight),
-                    size: .init(Float(endColumn - startColumn) * cellWidth, cellHeight),
-                    color: color))
-        }
-        return quads
-    }
 }

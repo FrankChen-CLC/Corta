@@ -57,7 +57,7 @@ struct LicenseHeaderRuleTests {
     @Test(
         "each kind of file is classified",
         arguments: [
-            ("Corta/AppDelegate.swift", LicenseHeaders.Treatment.header(.slashes)),
+            ("Corta/App/AppDelegate.swift", LicenseHeaders.Treatment.header(.slashes)),
             ("Corta/SharedMemory.c", .header(.slashes)),
             ("CortaTerminal/Package.swift", .header(.slashes)),
             ("Corta/Renderer/Shaders.metal", .header(.slashes)),
@@ -70,7 +70,7 @@ struct LicenseHeaderRuleTests {
             ("CortaTerminal/Tests/CortaTerminalTests/Golden/sgr.in", .reuse),
             ("CortaTerminal/Tests/Fuzz/corpus/seed-1.bin", .reuse),
             ("docs/brand/corta-pangolin-mascot.png", .reuse),
-            ("docs/brand/social-preview.swift", .header(.slashes)),
+            ("scripts/brand/social-preview.swift", .header(.slashes)),
             ("Corta/Acknowledgements/Sparkle-LICENSE.txt", .reuse),
             ("AppIcon.icon/icon.json", .reuse),
             ("Corta.xcodeproj/project.pbxproj", .reuse),

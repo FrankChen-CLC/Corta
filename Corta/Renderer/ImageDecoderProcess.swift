@@ -14,6 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+import CortaPOSIX
 import CortaTerminal
 import Darwin
 import Foundation
@@ -144,8 +145,6 @@ nonisolated enum ImageDecoderProcess {
         var width: Int
         var height: Int
         var pixels: SharedPixels
-        // Inspection only; the texture path never asks for a packed CPU copy.
-        var bgra: [UInt8] { pixels.packedBytes(width: width, height: height) }
     }
 
     /// The header's size, held to the caps before anything is allocated.
@@ -202,12 +201,7 @@ nonisolated enum ImageDecoderProcess {
             &attributes,
             Int16(POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSID | POSIX_SPAWN_SETSIGDEF
                 | POSIX_SPAWN_SETSIGMASK))
-        var allSignals = sigset_t()
-        sigfillset(&allSignals)
-        posix_spawnattr_setsigdefault(&attributes, &allSignals)
-        var noSignals = sigset_t()
-        sigemptyset(&noSignals)
-        posix_spawnattr_setsigmask(&attributes, &noSignals)
+        resetSignals(of: &attributes)
 
         let argv0 = strdup(helper)
         defer { free(argv0) }
@@ -369,5 +363,5 @@ nonisolated enum ImageDecoderProcess {
 
 @_silgen_name("corta_shared_memory_open")
 nonisolated private func sharedMemoryOpen(
-    _ name: UnsafePointer<CChar>, _ flags: Int32, _ mode: mode_t
+    _: UnsafePointer<CChar>, _: Int32, _: mode_t
 ) -> Int32

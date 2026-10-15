@@ -3,7 +3,7 @@
 A native macOS terminal emulator in pure Swift. Metal rendering, Core
 Text shaping, AppKit shell, a hand-written VT parser.
 
-**Status (2026-10-09): 1.1.8 is the current release; the next
+**Status (2026-10-14): 1.2.1 is the current release; the next
 version's GitHub milestone is the working list.** A release is a
 single manual `Release` run on `main` that versions, signs, notarises,
 publishes and signs `appcast.xml` (D20, amended) — `docs/RELEASING.md` has
@@ -36,7 +36,7 @@ source of truth; this file is an index. `docs/README.md` is the fuller one.
 | `docs/CONFIGURATION.md`    | Every config-file key: settings, themes, keybindings, presets, and when each applies — `DocumentationDriftTests` pins it to the code |
 | `docs/DECISIONS.md`        | The settled decisions, one record each — read before proposing an architecture change |
 | `docs/DESIGN.md`           | Goals, architecture, modules, non-goals                     |
-| `docs/CONFORMANCE.md`      | Feature priorities (P0/P1/P2), the daily-driver checklist, test strategy, the five-point manual check |
+| `docs/CONFORMANCE.md`      | Feature priorities (P0/P1/P2), the daily-driver checklist, test strategy, the launched-app check |
 | `docs/PERFORMANCE.md`      | Targets, the hot-path rules, how each number is measured, the numbers |
 | `docs/SECURITY.md`         | Threat model, escape-sequence injection, resource caps, process safety, the four trust boundaries |
 | `docs/TROUBLESHOOTING.md`  | What a user sees when something fails, and the fix          |
@@ -78,10 +78,12 @@ line each:
 - **D24** The canvas stays below an opaque titlebar; no background
   extension. **D25** Metal frames present on their own, not with the
   Core Animation transaction.
-- **D26** Future releases and Sparkle updates use a signed, notarised DMG;
-  published ZIPs remain unchanged. **D27** SFTP asks for passwords,
+- **D26** Releases and Sparkle updates use a signed, notarised DMG since
+  1.1.9; published ZIPs remain unchanged. **D27** SFTP asks for passwords,
   passphrases and host keys through OpenSSH's `SSH_ASKPASS`, answered by
   Corta's own executable and a dialog; nothing is stored.
+- **D28** Local tools are Swift; CI-only glue may be Python (standard
+  library, tested in `scripts/tests/`).
 
 ## Working Rules
 
@@ -120,7 +122,7 @@ anything else that outlives the test. Clean up what you create.
 tests assert pixel coverage and cannot see view-hierarchy, orientation,
 startup-ordering or gesture defects — six such bugs shipped a blank or
 unusable window while those tests stayed green. `docs/CONFORMANCE.md`
-§4.4 has the five-point check.
+§4.4 has the check, seven points.
 
 **First responder is not free.** Nothing makes the terminal view first
 responder by default; `SplitViewController.viewWillAppear` calls
@@ -153,7 +155,12 @@ at its key-code mapping and `SecureInput` through an injected `System`.
 The unit-test host gets a throwaway stage of its own
 (`$TMPDIR/Corta-Tests-<pid>`, D22 amended), so the suite never reads or
 writes the `Corta Dev/config` a developer runs with; a test that seems to
-see odd settings is reading its own stage, not yours.
+see odd settings is reading its own stage, not yours. A wait's ceiling is
+measured on `SuspendingClock`: `ContinuousClock` and `Date` count the time a
+closed lid sleeps the Mac, which once spent every deadline in flight at
+once. Dead code is found with Periphery's two scans read together
+(`.periphery.yml`, `CortaTerminal/.periphery.yml`; `TESTING.md` "Dead
+code"), and code kept on purpose says why in a `periphery:ignore` comment.
 
 **SwiftUI where AppKit decides.** Settings' sidebar is an AppKit
 `NSSplitViewItem(sidebarWithViewController:)` with SwiftUI pages beside it:
@@ -182,7 +189,10 @@ goes there and nowhere else. The feed's own invariant — the appcast, its
 signature and the archive it names being the same bytes, verified under
 the app's `SUPublicEDKey` — is `scripts/verify-appcast.swift`, which that
 check calls at release time, `ci.yml` runs offline on every run and
-`nightly.yml` runs against the published archives.
+`nightly.yml` runs against the published archives. The feed is signed whole,
+so `appcast.xml` is never edited on `main`: a path its header comment names
+that has moved is repointed by `scripts/appcast-header.py`, which the
+signing run calls before it signs.
 
 **Release secrets live in the release environment, and signing needs the
 certificate.** The Developer ID `.p12` and its password, the App Store
@@ -218,9 +228,10 @@ can never be deleted from. `CONTRIBUTING.md` rule 6.
 
 ## Build and Test
 
-Only stable, released Xcode toolchains are supported. `XCODE_PIN` is set
-in five workflows — `ci.yml`, `nightly.yml`, `release.yml`, `render.yml`
-and `codeql.yml` — and they move together or not at all.
+Only stable, released Xcode toolchains are supported. `.xcode-version`
+names the one every workflow uses, through
+`.github/actions/select-xcode`; changing that file changes the toolchain
+the shipped binary is built with.
 
 **The pin governs the artifact; it does not govern the numbers.** The pin
 is what compiles the binary users run. Every measurement in
@@ -237,8 +248,8 @@ xcodebuild -project Corta.xcodeproj -scheme Corta build
 xcodebuild -project Corta.xcodeproj -scheme Corta test
 ```
 
-Documentation for the core builds with
-`xcodebuild docbuild -project Corta.xcodeproj -scheme Corta`. Fuzzing and
+Documentation for the app, the core and its helpers builds, warning-free,
+with `xcodebuild docbuild -project Corta.xcodeproj -scheme Corta`. Fuzzing and
 the core benchmark are SwiftPM products:
 
 ```sh
@@ -250,21 +261,28 @@ CortaTerminal/.build/release/corta-bench
 
 Layout:
 
-- `Corta/` — AppKit shell, Metal renderer, font stack
+- `Corta/` — AppKit shell, Metal renderer, font stack, in subfolders by
+  area: `App`, `Window`, `Pane`, `TerminalView`, `Renderer`, `Shell`,
+  `Remote`, `Settings` (synchronized groups: a moved file needs no
+  `project.pbxproj` edit)
 - `CortaTerminal/` — the terminal core as a local SwiftPM package, with
-  its own tests, golden fixtures, fuzz corpus and DocC catalog
+  its own tests, golden fixtures, fuzz corpus and DocC catalogs; its
+  `CortaPOSIX` target holds the descriptor, spawn and exit-status code the
+  core and the SFTP client share
 - `CortaTests/`, `CortaUITests/` — app-hosted test targets;
   `CortaPerformanceTests/` — the Release measurements, without `@testable`
 - `Corta.xcodeproj/` — build settings live in `project.pbxproj`
-- `scripts/` — the two Swift scripts CI runs (Metal 4 probe, feed check)
-  and the release workflow's `prepare-release` helpers with their tests;
-  `script/` — local helpers (`build_and_run.sh`) and the isolated-sshd
-  fixture CI runs for the real SSH/SFTP suite;
+- `scripts/` — every helper, one directory: the Swift scripts CI runs
+  (Metal 4 probe, feed check), `build-and-run.sh`, the isolated-sshd
+  fixture for the real SSH/SFTP suite, `disk-image/` and `brand/`, and the
+  Python CI glue (the D28 exception) with its tests in `scripts/tests/`;
   packaging is `corta-release-check`, measurement is `TestPlans/Release`
+- `.xcode-version` and `.github/actions/select-xcode` — the one Xcode pin
+  and the action every workflow selects it with
 - `TestPlans/` — `Unit` (the default), `UI` (interactive sessions only)
   and `Release` (`-configuration Benchmark`: the D17 measurement, and
   `MeasurementUITests` for the app-level numbers)
-- `docs/` — user and design documentation, plus the dated records
+- `docs/` — user and design documentation
 
 Deployment target is macOS 26.0, Swift 6, app sandbox disabled
 (intentionally — `docs/SECURITY.md` §4.1).

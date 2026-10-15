@@ -14,6 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+import CortaPOSIX
 import Darwin
 import Dispatch
 import Foundation
@@ -72,14 +73,18 @@ struct DescriptorHygieneTests {
             returned.signal()
         }
         reader.start()
-        // Long enough for the reader to be parked inside `read(2)`.
-        Thread.sleep(forTimeInterval: 0.3)
+        // The read has entered the guard; what remains before `read(2)`
+        // parks is a few instructions, and the child writes nothing.
+        let deadline = SuspendingClock.now + .seconds(10)
+        while pty.callsInFlight == 0, SuspendingClock.now < deadline { Thread.sleep(forTimeInterval: 0.001) }
+        #expect(pty.callsInFlight == 1, "the reader never started its read")
+        Thread.sleep(forTimeInterval: 0.01)
 
         // Darwin's `close(2)` would sleep until the read returned — here,
         // until `sleep 30` ended. The caller may be the main thread.
-        let closeStarted = ContinuousClock.now
+        let closeStarted = SuspendingClock.now
         pty.close()
-        #expect(ContinuousClock.now - closeStarted < .seconds(1))
+        #expect(SuspendingClock.now - closeStarted < .seconds(1))
 
         // The lowest free number is what `open` returns, so a released
         // number would come straight back here.
@@ -103,14 +108,14 @@ struct DescriptorHygieneTests {
                 "-c", "(trap '' HUP; exec sleep 10) </dev/tty >/dev/tty 2>&1 & sleep 0.2; exit 3",
             ])
         defer { session.stop() }
-        let exited = Mutex<ChildExit?>(nil)
+        let exited = Mutex<ProcessExit?>(nil)
         session.onChildExit = { exit in exited.withLock { $0 = exit } }
         session.start()
 
         // Well inside the job's 10 s, which ends it on its own afterwards
         // (it ignores the hangup `stop()` sends).
-        let deadline = ContinuousClock.now + .seconds(5)
-        while exited.withLock({ $0 }) == nil, ContinuousClock.now < deadline {
+        let deadline = SuspendingClock.now + .seconds(5)
+        while exited.withLock({ $0 }) == nil, SuspendingClock.now < deadline {
             Thread.sleep(forTimeInterval: 0.02)
         }
         #expect(exited.withLock { $0 } == .exited(code: 3))

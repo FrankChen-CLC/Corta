@@ -25,7 +25,7 @@ writes have their own bounded queue and backpressure.
 ### 2. The parser
 
 ``Parser`` is a state machine over `UInt8` — the VT500 diagram, with the
-UTF-8 decoder (``UTF8Decoder``) folded into the ground state. It knows
+UTF-8 decoder (`UTF8Decoder`) folded into the ground state. It knows
 nothing about a grid: it recognises a control, an escape, a CSI with its
 ``Parameters`` and ``Intermediates``, an OSC or DCS string, and calls the
 ``ParserPerformer`` it was given. Every accumulator has a cap, and an
@@ -33,10 +33,11 @@ overflowing string is discarded whole.
 
 ### 3. The performer
 
-``Performer`` is the ``ParserPerformer`` that turns recognised sequences
-into grid operations: cursor motion, erasing, scrolling regions, modes,
-SGR into a ``Pen``, OSC 0/2/7/8/52/133 and the Kitty graphics commands.
-Its state — ``PerformerState`` — is the terminal's, and it is where a
+`Performer`, internal to the package, is the ``ParserPerformer`` that
+turns recognised sequences into grid operations: cursor motion, erasing,
+scrolling regions, modes, SGR into a ``Pen``, OSC 0/2/7/8/52/133 and the
+Kitty graphics commands.
+Its state — `PerformerState` — is the terminal's, and it is where a
 *reply* is decided. Replies never contain text the stream supplied
 (`docs/SECURITY.md` §2.2).
 
@@ -53,9 +54,8 @@ per line so the renderer redraws only what changed.
 ### 5. Reading it back
 
 The app takes a grid snapshot under the session's lock, releases that lock,
-and builds the instance buffer from the snapshot. The default frame driver
-runs on the main thread; an experimental per-window render thread can own
-rendering instead. Presentation never gates the PTY reader. The document-anchored
+and builds the instance buffer from the snapshot, on the main thread, paced
+by the pane's display link. Presentation never gates the PTY reader. The document-anchored
 readers live here too so they can be tested without a window:
 ``Selection`` (rows counted from the screen boundary backwards into
 scrollback), ``Search`` (budgeted, so a pattern that would never finish is

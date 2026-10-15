@@ -14,6 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+import CortaPOSIX
 import Foundation
 import Synchronization
 import Testing
@@ -26,17 +27,20 @@ import Testing
 /// `TerminalSessionTests`: every test spawns a real child.
 @Suite(.serialized) struct SynchronizedOutputRecoveryTests {
     @Test func resetAndBeginInOneBatchStillArmRecovery() throws {
+        let timers = ManualTimers()
         let session = try TerminalSession(executable: "/bin/sh", arguments: ["-c",
-            "printf '\\033[?2026hFIRST\\033[?2026l'; IFS= read -r line; printf '\\033c\\033[?2026hRESET-HELD'; sleep 30"], seams: .init(synchronizedOutputTimeout: .milliseconds(200)))
+            "printf '\\033[?2026hFIRST\\033[?2026l'; IFS= read -r line; printf '\\033c\\033[?2026hRESET-HELD'; sleep 30"], seams: timers.seams)
         defer { session.stop() }
         session.start()
         #expect(waitForGrid(session) { $0.contains("FIRST") }.contains("FIRST"))
-        // Let the first, already-ended episode's timer retire before RIS.
-        Thread.sleep(forTimeInterval: 0.6)
+        // The first, already-ended episode's timer retires before RIS.
+        #expect(waitForCondition(timers.count == 1, timeout: .seconds(30)))
+        timers.fire(0)
         session.write(Array("go\n".utf8))
         #expect(waitForGrid(session) { $0.contains("RESET-HELD") }.contains("RESET-HELD"))
-        let recovered = waitForCondition(!session.isSynchronizedOutputEnabled, timeout: .seconds(5))
-        #expect(recovered)
+        #expect(waitForCondition(timers.count == 2, timeout: .seconds(30)), "RIS and a begin in one batch must arm a timer")
+        timers.fire(1)
+        #expect(!session.isSynchronizedOutputEnabled)
     }
 
     @Test func risNeverReusesAnEpisodeIdentity() {
@@ -53,19 +57,20 @@ import Testing
     }
 
     @Test func anOldTimerCannotEndANewEpisodeAfterRIS() throws {
+        let timers = ManualTimers()
         let session = try TerminalSession(executable: "/bin/sh", arguments: ["-c",
-            "printf '\\033[?2026hFIRST\\033[?2026l'; IFS= read -r line; printf '\\033c\\033[?2026hNEW-HELD'; sleep 30"], seams: .init(synchronizedOutputTimeout: .seconds(2)))
+            "printf '\\033[?2026hFIRST\\033[?2026l'; IFS= read -r line; printf '\\033c\\033[?2026hNEW-HELD'; sleep 30"], seams: timers.seams)
         defer { session.stop() }
         session.start()
         #expect(waitForGrid(session) { $0.contains("FIRST") }.contains("FIRST"))
-        Thread.sleep(forTimeInterval: 1.2)
         session.write(Array("go\n".utf8))
         #expect(waitForGrid(session) { $0.contains("NEW-HELD") }.contains("NEW-HELD"))
-        // Past the old deadline, but well before the new two-second deadline.
-        Thread.sleep(forTimeInterval: 1.2)
-        #expect(session.isSynchronizedOutputEnabled)
-        let recovered = waitForCondition(!session.isSynchronizedOutputEnabled, timeout: .seconds(5))
-        #expect(recovered)
+        #expect(waitForCondition(timers.count == 2, timeout: .seconds(30)))
+        // The first episode's deadline passes while the new one is held.
+        timers.fire(0)
+        #expect(session.isSynchronizedOutputEnabled, "an old timer must not end a new episode")
+        timers.fire(1)
+        #expect(!session.isSynchronizedOutputEnabled)
     }
 
     /// A child that begins an episode and never sends the DECRST: after the
@@ -73,10 +78,11 @@ import Testing
     /// signal output again, so the shell's latched owed-present draws the
     /// withheld frames.
     @Test func missedResetIsRecoveredAfterTimeout() throws {
+        let timers = ManualTimers()
         let session = try TerminalSession(
             executable: "/bin/sh",
             arguments: ["-c", "printf '\\033[?2026hCORTA-SYNC-HELD'; sleep 30"],
-            seams: .init(synchronizedOutputTimeout: .milliseconds(200)))
+            seams: timers.seams)
         defer { session.stop() }
         let outputCount = Mutex(0)
         session.onOutput = { outputCount.withLock { $0 += 1 } }
@@ -89,13 +95,11 @@ import Testing
         #expect(session.isSynchronizedOutputEnabled)
 
         let outputsBeforeRecovery = outputCount.withLock { $0 }
-        let recovered = waitForCondition(
-            !session.isSynchronizedOutputEnabled, timeout: .seconds(10))
-        #expect(recovered, "a missed DECRST must be recovered by the timeout")
-        let recoveredSignal = waitForCondition(
-            outputCount.withLock { $0 } > outputsBeforeRecovery, timeout: .seconds(10))
+        #expect(waitForCondition(timers.count == 1, timeout: .seconds(30)))
+        timers.fire(0)
+        #expect(!session.isSynchronizedOutputEnabled, "a missed DECRST must be recovered by the timeout")
         #expect(
-            recoveredSignal,
+            outputCount.withLock { $0 } > outputsBeforeRecovery,
             "the timeout must signal output so the shell presents the withheld frames")
     }
 
@@ -103,10 +107,11 @@ import Testing
     /// and the recovery timer for that episode must not fire afterwards (it
     /// would manufacture an output signal for nothing).
     @Test func normalBeginEndIsNotAffectedByTimeout() throws {
+        let timers = ManualTimers()
         let session = try TerminalSession(
             executable: "/bin/sh",
             arguments: ["-c", "printf '\\033[?2026hCORTA-SYNCED\\033[?2026l'; sleep 30"],
-            seams: .init(synchronizedOutputTimeout: .milliseconds(200)))
+            seams: timers.seams)
         defer { session.stop() }
         let outputCount = Mutex(0)
         session.onOutput = { outputCount.withLock { $0 += 1 } }
@@ -119,9 +124,9 @@ import Testing
         #expect(!session.isSynchronizedOutputEnabled)
 
         let outputsAfterEnd = outputCount.withLock { $0 }
-        // Well past the timeout: the episode's timer must have been a no-op.
-        Thread.sleep(forTimeInterval: 0.6)
-        #expect(outputCount.withLock { $0 } == outputsAfterEnd)
+        #expect(waitForCondition(timers.count == 1, timeout: .seconds(30)))
+        timers.fire(0)
+        #expect(outputCount.withLock { $0 } == outputsAfterEnd, "the ended episode's timer must be a no-op")
         #expect(!session.isSynchronizedOutputEnabled)
     }
 
@@ -135,7 +140,7 @@ import Testing
             arguments: ["-c", "printf '\\033[?2026hCORTA-SYNC-ORPHAN'"],
             seams: .init(synchronizedOutputTimeout: .seconds(30)))
         defer { session.stop() }
-        let exited = Mutex<ChildExit?>(nil)
+        let exited = Mutex<ProcessExit?>(nil)
         session.onChildExit = { exit in exited.withLock { $0 = exit } }
         session.start()
 
@@ -147,15 +152,26 @@ import Testing
             "child exit must end the episode, not wait out the timeout")
     }
 
+    /// The session's `?2026` timeouts, armed into a list instead of a dispatch
+    /// timer: a test fires each one when it means to.
+    private final class ManualTimers: Sendable {
+        private let armed = Mutex<[@Sendable () -> Void]>([])
+        var count: Int { armed.withLock { $0.count } }
+        var seams: TerminalSession.Seams {
+            .init(scheduleSynchronizedOutputTimeout: { [self] _, expire in armed.withLock { $0.append(expire) } })
+        }
+        func fire(_ index: Int) { armed.withLock { $0[index] }() }
+    }
+
     /// Polls the grid until `condition` accepts its dump, or the hang
     /// ceiling expires. Returns the last dump either way.
     private func waitForGrid(
         _ session: TerminalSession, timeout: Duration = .seconds(30),
         until condition: (String) -> Bool
     ) -> String {
-        let deadline = ContinuousClock.now + timeout
+        let deadline = SuspendingClock.now + timeout
         var dump = session.snapshot().dump()
-        while !condition(dump), ContinuousClock.now < deadline {
+        while !condition(dump), SuspendingClock.now < deadline {
             Thread.sleep(forTimeInterval: 0.01)
             dump = session.snapshot().dump()
         }
@@ -166,8 +182,8 @@ import Testing
     private func waitForCondition(
         _ condition: @autoclosure () -> Bool, timeout: Duration
     ) -> Bool {
-        let deadline = ContinuousClock.now + timeout
-        while !condition(), ContinuousClock.now < deadline {
+        let deadline = SuspendingClock.now + timeout
+        while !condition(), SuspendingClock.now < deadline {
             Thread.sleep(forTimeInterval: 0.01)
         }
         return condition()

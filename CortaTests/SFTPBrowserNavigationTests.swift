@@ -15,7 +15,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import CortaSFTP
-import CortaTerminal
 import Foundation
 import Synchronization
 import Testing
@@ -101,13 +100,13 @@ struct SFTPPathResourceTests {
         model.connect()
         await waitUntil("deep path connected") { model.connectionState == .connected }
         #expect(model.currentPath == path)
-        let start = ContinuousClock.now
+        let start = SuspendingClock.now
         let crumbs = SFTPPathBar.breadcrumbs(for: model.currentPath)
         #expect(crumbs.count == 8)
         #expect(crumbs[0].path == "/" && crumbs[1].title == "…")
         #expect(crumbs.last?.path == path)
         #expect(crumbs.reduce(0) { $0 + $1.path.utf8.count } <= path.utf8.count * 8)
-        #expect(ContinuousClock.now - start < .seconds(1))
+        #expect(SuspendingClock.now - start < .seconds(1))
         for count in [1, 2] {
             let folded = SFTPPathBar.breadcrumbs(for: path, keepingLast: count)
             #expect(folded.count == count + 2)
@@ -123,13 +122,13 @@ struct SFTPPathResourceTests {
 
     @Test("slash-heavy canonical paths normalize in one walk")
     func slashHeavyPaths() {
-        let start = ContinuousClock.now
+        let start = SuspendingClock.now
         let slashes = String(repeating: "/", count: 262_144)
         #expect(SFTPBrowserModel.normalized(path: slashes) == "/")
         #expect(SFTPBrowserModel.parentPath(of: "/srv/app" + slashes) == "/srv")
         #expect(SFTPBrowserModel.normalized(path: "") == "")
         #expect(SFTPBrowserModel.normalized(path: "/界/é///") == "/界/é")
-        #expect(ContinuousClock.now - start < .seconds(1))
+        #expect(SuspendingClock.now - start < .seconds(1))
     }
 }
 
@@ -357,8 +356,7 @@ struct SFTPTransferListTests {
     @Test("the rate needs two samples half a second apart, then follows a third of the way")
     func rateSmoothing() {
         var transfer = SFTPTransferQueue.Transfer(
-            id: UUID(), isUpload: false, name: "a", remotePath: "/a",
-            localURL: URL(fileURLWithPath: "/tmp/a"), host: "h",
+            id: UUID(), isUpload: false, name: "a", localURL: URL(fileURLWithPath: "/tmp/a"), host: "h",
             state: .active(completed: 0, total: 4000))
         transfer = SFTPTransferQueue.updatedRate(transfer, completed: 0, now: 10)
         #expect(transfer.bytesPerSecond == nil)

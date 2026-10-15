@@ -60,7 +60,7 @@ and copying a long command inserts a spurious newline. Retrofitting it
 means rewriting the grid and every consumer.
 
 **Consequence.** Any new feature that touches rows has to say what it does
-with the flag. `CortaTerminal/Selection.swift` is the reference consumer.
+with the flag. The core's `Selection.swift` is the reference consumer.
 Reflow of a large scrollback has to stay cheap enough for a live window
 drag, which fires resize continuously.
 
@@ -78,12 +78,14 @@ without launching an app.
 **Consequence.** Types in the core are `Sendable` by construction or
 explicitly not shared. The app owns every main-thread hand-off.
 
-**Render experiment (2026-10-11, #284).** `CORTA_RENDER_THREAD=1` confines
-renderer mutation and display links to one serial run loop per window. Main
-publishes immutable inputs through a mutex mailbox and consumes coalesced
-feedback; the reader directly wakes the owner. The default stays on main
-while the measured keypress latency gate fails. See the linked performance
-record before enabling the experiment by default.
+**Render experiment, removed (2026-10-14).** #284 built an opt-in
+per-window render thread (`CORTA_RENDER_THREAD=1`): renderer mutation and
+display links on one serial run loop per window, inputs published through a
+mailbox. It closed with its power saving unproven and its frame timing
+mixed, stayed off by default, and kept a second ownership model in every
+frame, font and cursor path; #337's latency work does not need it. It was
+removed rather than carried. Its record is #284 and the commits that close
+it; a second attempt starts from them, not from a dormant switch.
 
 ## D05 — Cells are fixed-size; complex graphemes spill to a side table
 
@@ -110,7 +112,7 @@ keyed by position, not a new field. `CellTests` asserts the size.
 
 **Decision.** Selection coordinates are document rows — scrollback counts
 backwards from the screen boundary — never viewport rows. The rules that
-consult the `wrapped` flag live in `CortaTerminal/Selection.swift`; the
+consult the `wrapped` flag live in the core's `Selection.swift`; the
 app stores only the range.
 
 **Why.** A selection anchored to the viewport moves when output scrolls.
@@ -216,7 +218,7 @@ under a bare `zsh -f` with no `PATH` and a demo banner for days, and
 
 **Decision.** Offscreen render tests assert pixel coverage and cannot see
 view-hierarchy, orientation, startup-ordering or gesture defects.
-`CONFORMANCE.md` §4.4 is the five-point check a person runs.
+`CONFORMANCE.md` §4.4 is the check a person runs on the launched app.
 
 **Why.** Six such bugs shipped a blank or unusable window while every
 test stayed green.
@@ -366,9 +368,10 @@ approval.
 a leaked Developer ID certificate is revoked and replaced, but a new
 Sparkle public key is only known to copies that already updated, so a
 rotation strands every install that did not. Hence the environment
-rather than a repository secret: a workflow that reaches the key has to
-run from a release tag and be approved by a person, so neither a pull
-request nor a pushed branch can read it. Third-party actions in that
+rather than a repository secret: until the 2026-10-06 amendment below, a
+workflow that reached the key had to run from a release tag and be
+approved by a person; since it, only a run on protected `main` can, so
+neither a pull request nor another branch can read it. Third-party actions in that
 workflow are pinned by commit SHA, and Sparkle's tools by the tarball's
 SHA-256. The maintainer keeps no separate backup of the key by choice;
 the login keychain it was exported from is the only readable copy.
@@ -599,10 +602,9 @@ after drawing the new Metal cursor exposed duplicate positions; holding the
 old Metal position until removal instead added measured staleness. Neither
 approach is used. Metal presentation remains independent of CA transactions.
 
-
 ## D26 — Releases ship as a disk image
 
-**Decision.** Starting with the next release after 1.1.8, publish only
+**Decision.** From 1.1.9 (2026-10-09), publish only
 `Corta-<version>.dmg` and `Corta-<version>.dmg.sha256`. Sparkle installs
 from the same disk image. Already published ZIPs, including Intel's 1.0.1,
 remain unchanged. The image contains only `Corta.app`, an `Applications`
@@ -674,3 +676,30 @@ its two environment variables before anything else runs.
 asks there. Reopen only with a reason to store a secret (a keychain item
 would be a new decision of its own) or a different transport for the
 question.
+
+## D28 — Local tools are Swift; CI-only glue may be Python
+
+**Decision.** The app, its command-line products (`corta-bench`,
+`corta-fuzz`, `corta-license`, `corta-release-check`) and every script a
+developer runs on their own Mac are Swift, or a few lines of shell around
+an Apple tool. A script that only a GitHub workflow runs — reading event
+payloads, routing a docs-only change, collecting CI evidence, checking
+links or a pull request title, driving the isolated sshd fixture — may be
+Python 3 from the runner's standard library, with no third-party packages,
+and carries tests in `scripts/tests/`. All of it lives in `scripts/`.
+
+**Why.** #133 moved the local tooling to Swift and Xcode so a contributor
+needs nothing beyond Xcode, and that still holds. The CI glue grew back in
+Python because much of it runs on Ubuntu runners, where a Swift script
+costs a toolchain install and minutes on every run, and because its work
+is JSON and text handling that Python's standard library does in a few
+lines. Rewriting about a thousand tested lines would buy uniformity and
+nothing a user sees.
+
+**What it costs.** Two languages in `scripts/`. A Python script that a
+developer starts running locally has crossed the line and should become
+Swift; a new rule about packaging still belongs in `corta-release-check`,
+never in a script.
+
+**Consequence.** Reopen with a reason the runners' Python cannot meet, or
+when the macOS runners become the only ones the glue needs.

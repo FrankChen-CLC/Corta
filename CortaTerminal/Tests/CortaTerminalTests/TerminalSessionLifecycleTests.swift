@@ -14,6 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+import CortaPOSIX
 import Foundation
 import Synchronization
 import Testing
@@ -34,8 +35,8 @@ import Testing
 
         // Negative check, so it is bounded and short: with no reader the
         // child's bytes sit in the pty and the grid must stay empty.
-        let deadline = ContinuousClock.now + .milliseconds(300)
-        while ContinuousClock.now < deadline {
+        let deadline = SuspendingClock.now + .milliseconds(300)
+        while SuspendingClock.now < deadline {
             #expect(!session.snapshot().dump().contains("CORTA-NOT-YET"))
             Thread.sleep(forTimeInterval: 0.01)
         }
@@ -54,12 +55,12 @@ import Testing
         // The child is gone before any reader exists.
         #expect(session.pty.waitForExit(timeout: .seconds(30)) != nil)
 
-        let exited = Mutex<ChildExit?>(nil)
+        let exited = Mutex<ProcessExit?>(nil)
         session.onChildExit = { exit in exited.withLock { $0 = exit } }
         session.start()
 
-        let deadline = ContinuousClock.now + .seconds(30)
-        while exited.withLock({ $0 }) == nil, ContinuousClock.now < deadline {
+        let deadline = SuspendingClock.now + .seconds(30)
+        while exited.withLock({ $0 }) == nil, SuspendingClock.now < deadline {
             Thread.sleep(forTimeInterval: 0.01)
         }
         #expect(exited.withLock { $0 } == .exited(code: 0))
@@ -68,19 +69,19 @@ import Testing
     @Test func exitRecordedBeforeCallbackInstalledIsReplayed() throws {
         let session = try TerminalSession(executable: "/usr/bin/true")
         defer { session.stop() }
-        let first = Mutex<ChildExit?>(nil)
+        let first = Mutex<ProcessExit?>(nil)
         session.onChildExit = { exit in first.withLock { $0 = exit } }
         session.start()
 
-        let deadline = ContinuousClock.now + .seconds(30)
-        while first.withLock({ $0 }) == nil, ContinuousClock.now < deadline {
+        let deadline = SuspendingClock.now + .seconds(30)
+        while first.withLock({ $0 }) == nil, SuspendingClock.now < deadline {
             Thread.sleep(forTimeInterval: 0.01)
         }
         #expect(first.withLock { $0 } == .exited(code: 0))
 
         // Installing a callback after the exit was recorded must replay it —
         // synchronously, on this thread.
-        let replayed = Mutex<ChildExit?>(nil)
+        let replayed = Mutex<ProcessExit?>(nil)
         session.onChildExit = { exit in replayed.withLock { $0 = exit } }
         #expect(replayed.withLock { $0 } == .exited(code: 0))
     }
@@ -123,8 +124,8 @@ import Testing
             #expect(session.write(Array("\(marker)\n".utf8)) == .accepted)
             let text = waitForGrid(session) { $0.contains("CHILD:\(marker)") }
             #expect(text.contains("CHILD:\(marker)"))
-            let deadline = ContinuousClock.now + .seconds(5)
-            while outputs.withLock({ $0 }) == before, ContinuousClock.now < deadline {
+            let deadline = SuspendingClock.now + .seconds(5)
+            while outputs.withLock({ $0 }) == before, SuspendingClock.now < deadline {
                 try await Task.sleep(for: .milliseconds(10))
             }
             #expect(outputs.withLock { $0 } > before,
@@ -189,14 +190,14 @@ import Testing
             executable: "/bin/sh",
             arguments: ["-c", "trap '' HUP; printf 'CORTA-IGNORING'; while :; do sleep 1; done"],
             seams: .init(hangupGracePeriod: .milliseconds(300)))
-        let exited = Mutex<ChildExit?>(nil)
+        let exited = Mutex<ProcessExit?>(nil)
         session.onChildExit = { exit in exited.withLock { $0 = exit } }
         session.start()
         _ = waitForGrid(session) { $0.contains("CORTA-IGNORING") }
         session.stop()
 
-        let deadline = ContinuousClock.now + .seconds(10)
-        while exited.withLock({ $0 }) == nil, ContinuousClock.now < deadline {
+        let deadline = SuspendingClock.now + .seconds(10)
+        while exited.withLock({ $0 }) == nil, SuspendingClock.now < deadline {
             Thread.sleep(forTimeInterval: 0.02)
         }
         #expect(exited.withLock { $0 } == .signalled(signal: SIGKILL))
@@ -219,9 +220,9 @@ import Testing
         _ session: TerminalSession, timeout: Duration = .seconds(30),
         until condition: (String) -> Bool
     ) -> String {
-        let deadline = ContinuousClock.now + timeout
+        let deadline = SuspendingClock.now + timeout
         var dump = session.snapshot().dump()
-        while !condition(dump), ContinuousClock.now < deadline {
+        while !condition(dump), SuspendingClock.now < deadline {
             Thread.sleep(forTimeInterval: 0.01)
             dump = session.snapshot().dump()
         }

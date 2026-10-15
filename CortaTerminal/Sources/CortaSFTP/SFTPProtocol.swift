@@ -222,13 +222,6 @@ public struct SFTPAttributes: Equatable, Sendable {
         self.extended = extended
     }
 
-    /// True when nothing is set — the ATTRS block sent with a READ-ONLY
-    /// open or any request that carries no metadata to apply.
-    public var isEmpty: Bool {
-        size == nil && userID == nil && groupID == nil && permissions == nil
-            && accessTime == nil && modificationTime == nil && extended.isEmpty
-    }
-
     static let flagSize: UInt32 = 0x0000_0001
     static let flagIDs: UInt32 = 0x0000_0002
     static let flagPermissions: UInt32 = 0x0000_0004
@@ -295,7 +288,9 @@ public struct SFTPStatus: Equatable, Sendable {
         public static let permissionDenied = Code(rawValue: 3)
         public static let failure = Code(rawValue: 4)  // SSH_FX_FAILURE
         public static let badMessage = Code(rawValue: 5)
+        // periphery:ignore - an SFTP v3 status code, kept so the table is whole
         public static let noConnection = Code(rawValue: 6)
+        // periphery:ignore - an SFTP v3 status code, kept so the table is whole
         public static let connectionLost = Code(rawValue: 7)
         public static let operationUnsupported = Code(rawValue: 8)
     }
@@ -323,6 +318,7 @@ public struct SFTPOpenFlags: OptionSet, Equatable, Sendable {
 
     public static let read = SFTPOpenFlags(rawValue: 0x0000_0001)
     public static let write = SFTPOpenFlags(rawValue: 0x0000_0002)
+    // periphery:ignore - an SFTP v3 open flag, kept so the table is whole
     public static let append = SFTPOpenFlags(rawValue: 0x0000_0004)
     public static let create = SFTPOpenFlags(rawValue: 0x0000_0008)
     public static let truncate = SFTPOpenFlags(rawValue: 0x0000_0010)
@@ -424,12 +420,19 @@ public enum SFTPPayload: Equatable, Sendable {
                 writer.writeString(item.name)
                 writer.writeString(item.data)
             }
+        // A request or reply that is one path, handle or block.
+        case .close(let string), .lstat(let string), .fstat(let string), .opendir(let string),
+            .readdir(let string), .remove(let string), .rmdir(let string),
+            .realpath(let string), .stat(let string), .handle(let string), .data(let string):
+            writer.writeString(string)
+        case .setstat(let string, let attributes), .fsetstat(let string, let attributes),
+            .mkdir(let string, let attributes):
+            writer.writeString(string)
+            writer.writeAttributes(attributes)
         case .open(let path, let flags, let attributes):
             writer.writeString(path)
             writer.writeUInt32(flags.rawValue)
             writer.writeAttributes(attributes)
-        case .close(let handle):
-            writer.writeString(handle)
         case .read(let handle, let offset, let length):
             writer.writeString(handle)
             writer.writeUInt64(offset)
@@ -438,31 +441,6 @@ public enum SFTPPayload: Equatable, Sendable {
             writer.writeString(handle)
             writer.writeUInt64(offset)
             writer.writeString(data)
-        case .lstat(let path):
-            writer.writeString(path)
-        case .fstat(let handle):
-            writer.writeString(handle)
-        case .setstat(let path, let attributes):
-            writer.writeString(path)
-            writer.writeAttributes(attributes)
-        case .fsetstat(let handle, let attributes):
-            writer.writeString(handle)
-            writer.writeAttributes(attributes)
-        case .opendir(let path):
-            writer.writeString(path)
-        case .readdir(let handle):
-            writer.writeString(handle)
-        case .remove(let path):
-            writer.writeString(path)
-        case .mkdir(let path, let attributes):
-            writer.writeString(path)
-            writer.writeAttributes(attributes)
-        case .rmdir(let path):
-            writer.writeString(path)
-        case .realpath(let path):
-            writer.writeString(path)
-        case .stat(let path):
-            writer.writeString(path)
         case .rename(let oldPath, let newPath):
             writer.writeString(oldPath)
             writer.writeString(newPath)
@@ -474,10 +452,6 @@ public enum SFTPPayload: Equatable, Sendable {
             writer.writeUInt32(status.code.rawValue)
             writer.writeString(status.message)
             writer.writeString(status.languageTag)
-        case .handle(let handle):
-            writer.writeString(handle)
-        case .data(let data):
-            writer.writeString(data)
         case .name(let entries):
             writer.writeUInt32(UInt32(entries.count))
             for entry in entries {
@@ -555,28 +529,7 @@ public enum SFTPPayload: Equatable, Sendable {
         case SFTPCodec.MessageType.data:
             return .data(try reader.readString(field: "data"))
         case SFTPCodec.MessageType.name:
-            let count = try reader.readUInt32()
-            // One entry minimally encodes as two empty strings and an empty
-            // ATTRS (4 + 4 + 4 bytes). A count that exceeds what the
-            // remaining bytes could minimally hold is rejected up front, so
-            // the count never sizes an allocation the frame cannot fill.
-            let minimumEntryBytes = 12
-            if UInt64(count) > UInt64(reader.remaining / minimumEntryBytes) {
-                throw .truncated(
-                    field: "name.entries",
-                    needed: Int(count) * minimumEntryBytes,
-                    available: reader.remaining)
-            }
-            var entries: [SFTPEntry] = []
-            entries.reserveCapacity(Int(count))
-            for _ in 0..<count {
-                let filename = try reader.readString(field: "name.filename")
-                let longname = try reader.readString(field: "name.longname")
-                let attributes = try reader.readAttributes()
-                entries.append(
-                    SFTPEntry(filename: filename, longname: longname, attributes: attributes))
-            }
-            return .name(entries)
+            return .name(try decodeEntries(from: &reader))
         case SFTPCodec.MessageType.attrs:
             return .attrs(try reader.readAttributes())
         case SFTPCodec.MessageType.extendedReply:
@@ -584,6 +537,32 @@ public enum SFTPPayload: Equatable, Sendable {
         default:
             throw SFTPCodecError.unknownMessageType(type)
         }
+    }
+
+    /// A NAME reply's entries.
+    private static func decodeEntries(from reader: inout SFTPReader) throws(SFTPCodecError) -> [SFTPEntry] {
+        let count = try reader.readUInt32()
+        // One entry minimally encodes as two empty strings and an empty
+        // ATTRS (4 + 4 + 4 bytes). A count that exceeds what the
+        // remaining bytes could minimally hold is rejected up front, so
+        // the count never sizes an allocation the frame cannot fill.
+        let minimumEntryBytes = 12
+        if UInt64(count) > UInt64(reader.remaining / minimumEntryBytes) {
+            throw .truncated(
+                field: "name.entries",
+                needed: Int(count) * minimumEntryBytes,
+                available: reader.remaining)
+        }
+        var entries: [SFTPEntry] = []
+        entries.reserveCapacity(Int(count))
+        for _ in 0..<count {
+            let filename = try reader.readString(field: "name.filename")
+            let longname = try reader.readString(field: "name.longname")
+            let attributes = try reader.readAttributes()
+            entries.append(
+                SFTPEntry(filename: filename, longname: longname, attributes: attributes))
+        }
+        return entries
     }
 }
 

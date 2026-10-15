@@ -1,0 +1,446 @@
+// Copyright 2026 Noah Qin
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+import Foundation
+
+/// Whole directories, built on the single-file transfers.
+///
+/// A directory transfer is a walk plus one ordinary transfer per regular
+/// file, so every property the file transfers have — the `.corta-part`
+/// partial renamed over the destination, resume validated at both ends,
+/// the conflict policy, the bounded transport retry — holds file by file
+/// here too, and nothing is re-implemented. What the walk adds:
+///
+/// - **Directories merge.** An existing directory at the destination is
+///   not a conflict — the policy is asked about *files*, exactly as it
+///   would be for each of them transferred alone. `.fail` therefore means
+///   "stop at the first file that already exists", `.overwrite` replaces
+///   files one at a time, `.resume` resumes each file that has a partial.
+/// - **Only regular files and directories move.** Symbolic links (either
+///   end), sockets, devices and the like are skipped and *reported* in the
+///   receipt, never silently dropped or followed — following a link out of
+///   the tree is how a "download this folder" walks off into `/etc`.
+/// - **Names are checked.** A remote entry is one path component or it is
+///   skipped; a hostile server's `../x` never becomes a local path.
+/// - **Cancellation is between files.** The running file transfer is
+///   cancelled through the same `Task` cancellation as always, and the walk
+///   stops there; what completed stays complete, no partial is left where
+///   the policy says none may be.
+///
+/// The tree is enumerated up front so progress can say "file 3 of 41" and
+/// the total byte count from the first moment; a tree that changes under
+/// the transfer is reported by the file transfers that notice, not guessed
+/// around.
+extension SFTPTransferEngine {
+    public struct DirectoryTransferProgress: Equatable, Sendable {
+        public var filesCompleted: Int
+        public var filesTotal: Int
+        public var completedBytes: UInt64
+        /// The sum of the sizes the enumeration saw; `nil` when any file's
+        /// size was not reported.
+        public var totalBytes: UInt64?
+
+        public init(
+            filesCompleted: Int, filesTotal: Int, completedBytes: UInt64, totalBytes: UInt64?
+        ) {
+            self.filesCompleted = filesCompleted
+            self.filesTotal = filesTotal
+            self.completedBytes = completedBytes
+            self.totalBytes = totalBytes
+        }
+    }
+
+    public typealias DirectoryProgressHandler = @Sendable (DirectoryTransferProgress) -> Void
+
+    public struct DirectoryTransferReceipt: Equatable, Sendable {
+        public var filesTransferred: Int
+        public var directoriesCreated: Int
+        /// Bytes moved by this run, resumed partial content not counted
+        /// again — the same rule as `SFTPTransferReceipt.bytesTransferred`.
+        public var bytesTransferred: UInt64
+        /// Entries that were not transferred and why, relative to the
+        /// transferred root: symbolic links, special files, names that are
+        /// not a single path component.
+        public var skipped: [Skipped]
+
+        public struct Skipped: Equatable, Sendable {
+            public enum Reason: Equatable, Sendable {
+                case symbolicLink
+                case notARegularFile
+                case unsafeName
+            }
+            public var relativePath: String
+            public var reason: Reason
+        }
+
+        public init(
+            filesTransferred: Int, directoriesCreated: Int, bytesTransferred: UInt64,
+            skipped: [Skipped]
+        ) {
+            self.filesTransferred = filesTransferred
+            self.directoriesCreated = directoriesCreated
+            self.bytesTransferred = bytesTransferred
+            self.skipped = skipped
+        }
+    }
+
+    // MARK: - Download
+
+    /// Downloads the tree at `remotePath` into `localDirectory` (created if
+    /// absent, merged if present), one atomic file transfer at a time.
+    @discardableResult
+    public func downloadDirectory(
+        remotePath: String,
+        to localDirectory: URL,
+        policy: ConflictPolicy = .fail,
+        progress: DirectoryProgressHandler? = nil
+    ) async throws(SFTPError) -> DirectoryTransferReceipt {
+        let plan = try await enumerateRemote(root: remotePath)
+        // A blanket merge/overwrite decision never authorizes consuming a
+        // sibling as staging storage. Reject namespace collisions before
+        // writing any entries, independent of the peer's listing order.
+        let targets = Set(plan.files.map(\.relativePath) + plan.directories)
+        for file in plan.files {
+            let partial = Self.partialPath(for: file.relativePath)
+            let partialURL = localDirectory.appendingPathComponent(partial)
+            var info = Darwin.stat()
+            if targets.contains(partial) || Darwin.lstat(partialURL.path, &info) == 0 {
+                throw .destinationConflict(path: partialURL.path)
+            }
+            if errno != ENOENT {
+                throw .localIOFailed(operation: "lstat partial", code: errno)
+            }
+        }
+        let filePolicy = Self.directoryFilePolicy(policy)
+        var receipt = DirectoryTransferReceipt(
+            filesTransferred: 0, directoriesCreated: 0, bytesTransferred: 0,
+            skipped: plan.skipped)
+
+        for directory in plan.directories {
+            let url = directory.isEmpty
+                ? localDirectory : localDirectory.appendingPathComponent(directory)
+            try Self.rejectLocalSymlinkComponents(url, within: localDirectory)
+            if !FileManager.default.fileExists(atPath: url.path) {
+                do {
+                    try FileManager.default.createDirectory(
+                        at: url, withIntermediateDirectories: true)
+                } catch {
+                    throw SFTPError.localIOFailed(operation: "mkdir", code: Int32(errno))
+                }
+                receipt.directoriesCreated += 1
+            }
+        }
+
+        try await transferFiles(of: plan, into: &receipt, progress: progress) { file, fileProgress throws(SFTPError) in
+            try Self.rejectLocalSymlinkComponents(
+                localDirectory.appendingPathComponent(file.relativePath), within: localDirectory)
+            return try await download(
+                remotePath: Self.join(remotePath, file.relativePath),
+                to: localDirectory.appendingPathComponent(file.relativePath),
+                policy: filePolicy, partialDisposition: .automatic, progress: fileProgress)
+        }
+        return receipt
+    }
+
+    /// Refuse existing symlink components from `url` up to and including
+    /// `root`, the folder the transfer creates or merges into. What lies
+    /// above `root` is the folder the user chose and its ancestors — a
+    /// `~/Downloads` that is a link to another volume is theirs to have.
+    /// This hardens pre-existing local state; it is not a race-proof sandbox
+    /// against another process deliberately replacing directories mid-transfer.
+    static func rejectLocalSymlinkComponents(_ url: URL, within root: URL) throws(SFTPError) {
+        let rootPath = root.standardizedFileURL.path
+        var current = url.standardizedFileURL
+        while current.path != "/", current.path.count >= rootPath.count {
+            var info = Darwin.stat()
+            if Darwin.lstat(current.path, &info) == 0 {
+                if info.st_mode & S_IFMT == S_IFLNK {
+                    // macOS /tmp and /var are system aliases, not tree entries.
+                    if current.path != "/tmp" && current.path != "/var" {
+                        throw .localIOFailed(operation: "symlink destination", code: ELOOP)
+                    }
+                } else if current != url.standardizedFileURL && info.st_mode & S_IFMT != S_IFDIR {
+                    throw .localIOFailed(operation: "directory destination", code: ENOTDIR)
+                }
+            } else if errno != ENOENT {
+                throw .localIOFailed(operation: "lstat destination", code: errno)
+            }
+            current.deleteLastPathComponent()
+        }
+    }
+
+    /// Directory-level consent does not identify existing per-file partials.
+    /// Recheck at each file, after preflight, so later collisions also fail.
+    private static func directoryFilePolicy(_ policy: ConflictPolicy) -> ConflictPolicy {
+        .decide { conflict in
+            if conflict.partialSize != nil, !conflict.partialIsOwned { return .fail }
+            switch policy {
+            case .fail: return .fail
+            case .overwrite: return .overwrite
+            case .resume: return .resume
+            case .decide(let choose): return choose(conflict)
+            }
+        }
+    }
+
+    // MARK: - Upload
+
+    /// Uploads the tree at `localDirectory` to `remotePath` (created if
+    /// absent, merged if present), one atomic file transfer at a time.
+    @discardableResult
+    public func uploadDirectory(
+        from localDirectory: URL,
+        to remotePath: String,
+        policy: ConflictPolicy = .fail,
+        progress: DirectoryProgressHandler? = nil
+    ) async throws(SFTPError) -> DirectoryTransferReceipt {
+        let plan = try Self.enumerateLocal(root: localDirectory)
+        var receipt = DirectoryTransferReceipt(
+            filesTransferred: 0, directoriesCreated: 0, bytesTransferred: 0,
+            skipped: plan.skipped)
+
+        for directory in plan.directories {
+            let path = directory.isEmpty ? remotePath : Self.join(remotePath, directory)
+            if try await ensureRemoteDirectory(path) { receipt.directoriesCreated += 1 }
+        }
+
+        try await transferFiles(of: plan, into: &receipt, progress: progress) { file, fileProgress throws(SFTPError) in
+            try await upload(
+                from: localDirectory.appendingPathComponent(file.relativePath),
+                to: Self.join(remotePath, file.relativePath),
+                policy: policy, partialDisposition: .automatic, progress: fileProgress)
+        }
+        return receipt
+    }
+
+    /// Moves `plan`'s files one at a time with `transfer`, reporting the
+    /// directory's progress before each file, through each file's own
+    /// progress, and once at the end.
+    private func transferFiles(
+        of plan: TreePlan, into receipt: inout DirectoryTransferReceipt,
+        progress: DirectoryProgressHandler?,
+        transfer: (TreePlan.PlannedFile, ProgressHandler?) async throws(SFTPError) -> SFTPTransferReceipt
+    ) async throws(SFTPError) {
+        var completedBytes: UInt64 = 0
+        for (index, file) in plan.files.enumerated() {
+            if Task.isCancelled { throw .cancelled }
+            let completedSoFar = completedBytes
+            progress?(
+                DirectoryTransferProgress(
+                    filesCompleted: index, filesTotal: plan.files.count,
+                    completedBytes: completedSoFar, totalBytes: plan.totalBytes))
+            let fileReceipt = try await transfer(
+                file,
+                progress.map { handler in
+                    { @Sendable fileProgress in
+                        handler(
+                            DirectoryTransferProgress(
+                                filesCompleted: index, filesTotal: plan.files.count,
+                                completedBytes: completedSoFar + fileProgress.completedBytes,
+                                totalBytes: plan.totalBytes))
+                    }
+                })
+            completedBytes += fileReceipt.bytesTransferred
+            receipt.filesTransferred += 1
+            receipt.bytesTransferred += fileReceipt.bytesTransferred
+        }
+        progress?(
+            DirectoryTransferProgress(
+                filesCompleted: plan.files.count, filesTotal: plan.files.count,
+                completedBytes: completedBytes, totalBytes: plan.totalBytes))
+    }
+
+    // MARK: - Enumeration
+
+    /// The tree as found before anything moves: directories in creation
+    /// order (parents first, `""` for the root itself), regular files with
+    /// their sizes, and what was skipped.
+    struct TreePlan: Equatable, Sendable {
+        var directories: [String] = [""]
+        var files: [PlannedFile] = []
+        var skipped: [DirectoryTransferReceipt.Skipped] = []
+        var totalBytes: UInt64? = 0
+
+        struct PlannedFile: Equatable, Sendable {
+            var relativePath: String
+        }
+
+        mutating func addFile(_ relativePath: String, size: UInt64?) {
+            files.append(PlannedFile(relativePath: relativePath))
+            if let size, let total = totalBytes {
+                let sum = total.addingReportingOverflow(size)
+                totalBytes = sum.overflow ? nil : sum.partialValue
+            } else {
+                totalBytes = nil
+            }
+        }
+    }
+
+    /// Breadth-first over READDIR. The file-type bits of `permissions`
+    /// decide what an entry is; an entry without them is taken for a
+    /// regular file, which is what the file transfer will then verify.
+    func enumerateRemote(root: String) async throws(SFTPError) -> TreePlan {
+        var plan = TreePlan()
+        var pending = [""]
+        var nextDirectory = 0
+        var entryCount = 0
+        var pathBytes = 0
+        while nextDirectory < pending.count {
+            if Task.isCancelled { throw .cancelled }
+            let directory = pending[nextDirectory]
+            nextDirectory += 1
+            let path = directory.isEmpty ? root : Self.join(root, directory)
+            for entry in try await listDirectory(path: path) {
+                let name = entry.filenameUTF8
+                if name == "." || name == ".." { continue }
+                // Budget the whole tree, including skipped entries. A peer
+                // can otherwise evade a per-directory cap with small listings.
+                let relativeBytes = directory.utf8.count + (directory.isEmpty ? 0 : 1) + name.utf8.count
+                guard entryCount < configuration.maximumTreeEntries,
+                    relativeBytes <= configuration.maximumTreePathBytes - pathBytes
+                else { throw .protocolViolation("directory tree resource limit exceeded") }
+                entryCount += 1
+                pathBytes += relativeBytes
+                let relative = directory.isEmpty ? name : "\(directory)/\(name)"
+                guard entry.filenameIfUTF8 != nil, Self.isPlainComponent(name) else {
+                    plan.skipped.append(.init(relativePath: relative, reason: .unsafeName))
+                    continue
+                }
+                switch Self.fileType(of: entry.attributes.permissions) {
+                case .directory:
+                    guard relative.split(separator: "/").count <= configuration.maximumTreeDepth else {
+                        throw .protocolViolation("directory tree depth limit exceeded")
+                    }
+                    plan.directories.append(relative)
+                    pending.append(relative)
+                case .regular:
+                    plan.addFile(relative, size: entry.attributes.size)
+                case .symbolicLink:
+                    plan.skipped.append(.init(relativePath: relative, reason: .symbolicLink))
+                case .other:
+                    plan.skipped.append(.init(relativePath: relative, reason: .notARegularFile))
+                }
+            }
+        }
+        return plan
+    }
+
+    /// Depth-first over the local tree without following symbolic links;
+    /// the plan lists directories parents-first so remote `MKDIR`s land in
+    /// order.
+    static func enumerateLocal(root: URL) throws(SFTPError) -> TreePlan {
+        var plan = TreePlan()
+        // The enumerator yields nothing for a root that is missing or
+        // unreadable, which looked exactly like an empty folder: a folder
+        // moved away while its upload was queued created an empty remote
+        // directory and reported success.
+        var rootInfo = Darwin.stat()
+        guard fstatat(AT_FDCWD, root.path, &rootInfo, 0) == 0 else {
+            throw .localIOFailed(operation: "opendir", code: errno)
+        }
+        guard rootInfo.st_mode & S_IFMT == S_IFDIR else {
+            throw .localIOFailed(operation: "opendir", code: ENOTDIR)
+        }
+        guard Darwin.access(root.path, R_OK | X_OK) == 0 else {
+            throw .localIOFailed(operation: "opendir", code: errno)
+        }
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+        // A subdirectory that cannot be read is a tree that cannot be
+        // uploaded whole: the walk stops and says so, rather than reporting
+        // a partial tree as the folder.
+        let enumerationError = EnumerationError()
+        guard
+            let enumerator = FileManager.default.enumerator(
+                at: root, includingPropertiesForKeys: Array(keys),
+                options: [.producesRelativePathURLs],
+                errorHandler: { _, error in
+                    let underlying = (error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError
+                    if enumerationError.code == nil {
+                        enumerationError.code = Int32(clamping: underlying?.code ?? Int(EIO))
+                    }
+                    return false
+                })
+        else { throw .localIOFailed(operation: "opendir", code: ENOENT) }
+        let rootPath = root.standardizedFileURL.path
+        for case let url as URL in enumerator {
+            if Task.isCancelled { throw .cancelled }
+            let values = try? url.resourceValues(forKeys: keys)
+            let absolute = url.standardizedFileURL.path
+            let relative =
+                absolute.hasPrefix(rootPath + "/")
+                ? String(absolute.dropFirst(rootPath.count + 1)) : url.relativePath
+            if values?.isSymbolicLink == true {
+                plan.skipped.append(.init(relativePath: relative, reason: .symbolicLink))
+                enumerator.skipDescendants()
+            } else if values?.isDirectory == true {
+                plan.directories.append(relative)
+            } else if values?.isRegularFile == true {
+                plan.addFile(relative, size: values?.fileSize.map(UInt64.init))
+            } else {
+                plan.skipped.append(.init(relativePath: relative, reason: .notARegularFile))
+            }
+        }
+        if let code = enumerationError.code {
+            throw .localIOFailed(operation: "readdir", code: code)
+        }
+        // The enumerator yields in traversal order, so parents precede
+        // their children already; sorting by depth keeps that true for
+        // any enumerator that does not promise it.
+        let root = plan.directories.removeFirst()
+        plan.directories.sort { $0.split(separator: "/").count < $1.split(separator: "/").count }
+        plan.directories.insert(root, at: 0)
+        return plan
+    }
+
+    /// `MKDIR`, tolerating a directory that is already there: returns
+    /// whether it was created. Anything else at the path is a failure the
+    /// caller hears about.
+    private func ensureRemoteDirectory(_ path: String) async throws(SFTPError) -> Bool {
+        if let existing = try? await lstat(path: path) {
+            if Self.fileType(of: existing.permissions) == .directory { return false }
+            throw .destinationConflict(path: path)
+        }
+        try await makeDirectory(path: path)
+        return true
+    }
+
+    enum FileType { case regular, directory, symbolicLink, other }
+
+    static func fileType(of permissions: UInt32?) -> FileType {
+        guard let permissions else { return .regular }
+        switch permissions & 0o170000 {
+        case 0o040000: return .directory
+        case 0o100000: return .regular
+        case 0o120000: return .symbolicLink
+        default: return .other
+        }
+    }
+
+    static func isPlainComponent(_ name: String) -> Bool {
+        !name.isEmpty && name != "." && name != ".." && !name.contains("/") && !name.contains("\0")
+    }
+
+    static func join(_ directory: String, _ relative: String) -> String {
+        directory == "/" ? "/\(relative)" : "\(directory)/\(relative)"
+    }
+}
+
+/// The first error the local walk's enumerator reported. The walk calls its
+/// error handler synchronously on the walking thread, so a plain reference
+/// is enough; `@unchecked` only because the handler's type may be `@Sendable`.
+private final class EnumerationError: @unchecked Sendable {
+    var code: Int32?
+}
