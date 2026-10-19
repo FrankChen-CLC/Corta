@@ -10,6 +10,17 @@ Versioning for compatibility changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- Rapid clicks on New Tab always append and select the rightmost tab, even
+  while the previous tab's selection transition is still in progress;
+  toolbar actions keep their owning window throughout the transition.
+- SFTP rename, new-folder and upload dialogs keep the directory they opened
+  for when navigation finishes behind them, and refuse a replacement
+  connection. Remote-edit change detection, upload snapshots and saving a
+  copy elsewhere process file contents off the main thread; an older change
+  check cannot replace a newer edit or an approved baseline.
+
 ## [1.2.2] - 2026-10-15
 
 ### Changed
