@@ -25,6 +25,15 @@ enum ZshBootstrap {
         folders.removeAll()
     }
 
+    /// One session's folder, once its shell no longer needs it: a spawn
+    /// that failed, or a session that ended. Every tab, fallback rung and
+    /// reconnect makes one, and a long-running app kept them all until quit.
+    static func remove(_ folder: URL) {
+        guard let index = folders.firstIndex(of: folder) else { return }
+        folders.remove(at: index)
+        try? FileManager.default.removeItem(at: folder)
+    }
+
     /// Folders a run that never reached `removeGeneratedFiles` — a crash, a
     /// force quit — left behind. Only day-old ones: the development and
     /// release builds share the temporary directory, and the other may be
@@ -46,8 +55,17 @@ enum ZshBootstrap {
     nonisolated static let folderPrefix = "corta-zsh-"
     nonisolated static let staleAge: TimeInterval = 24 * 3600
     static func environment(_ original: [String: String], executable: String, arguments: [String]) -> [String: String] {
+        prepare(original, executable: executable, arguments: arguments).environment
+    }
+
+    /// The child's environment, and the wrapper folder it points zsh at —
+    /// nil when the shell is not a login zsh or the folder could not be
+    /// written — for `remove(_:)` once the session no longer needs it.
+    static func prepare(
+        _ original: [String: String], executable: String, arguments: [String]
+    ) -> (environment: [String: String], folder: URL?) {
         guard (executable as NSString).lastPathComponent == "zsh",
-            arguments == ["-l"] || arguments.isEmpty else { return original }
+            arguments == ["-l"] || arguments.isEmpty else { return (original, nil) }
         let fm = FileManager.default
         let folder = fm.temporaryDirectory.appendingPathComponent(folderPrefix + UUID().uuidString)
         let userDirectory = original["ZDOTDIR"] ?? original["HOME"] ?? NSHomeDirectory()
@@ -63,17 +81,22 @@ enum ZshBootstrap {
                 let script = restore + "[[ -r ${ZDOTDIR:-$HOME}/\(file) ]] && source ${ZDOTDIR:-$HOME}/\(file)\n" + capture + "ZDOTDIR=\(quote(folder.path))\n"
                 try script.write(to: folder.appendingPathComponent(file), atomically: true, encoding: .utf8)
             }
-            let rc = restore + "unset CORTA_USER_ZDOTDIR CORTA_USER_ZDOTDIR_SET\n[[ -r ${ZDOTDIR:-$HOME}/.zshrc ]] && source ${ZDOTDIR:-$HOME}/.zshrc\nsource \(quote(hook.path))\n"
+            // macOS's /etc/zshrc runs between the wrappers, while ZDOTDIR
+            // still names this folder, and sets HISTFILE from it: history
+            // went here and was deleted with the folder. Pointed back at the
+            // user's directory unless their own files chose another.
+            let history = "[[ $HISTFILE == \(quote(folder.appendingPathComponent(".zsh_history").path)) ]] && HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history\n"
+            let rc = restore + history + "unset CORTA_USER_ZDOTDIR CORTA_USER_ZDOTDIR_SET\n[[ -r ${ZDOTDIR:-$HOME}/.zshrc ]] && source ${ZDOTDIR:-$HOME}/.zshrc\nsource \(quote(hook.path))\n"
             try rc.write(to: folder.appendingPathComponent(".zshrc"), atomically: true, encoding: .utf8)
             folders.append(folder)
             var env = original
             env["CORTA_USER_ZDOTDIR"] = userDirectory
             env["CORTA_USER_ZDOTDIR_SET"] = original["ZDOTDIR"] == nil ? "0" : "1"
             env["ZDOTDIR"] = folder.path
-            return env
+            return (env, folder)
         } catch {
             try? fm.removeItem(at: folder)
-            return original
+            return (original, nil)
         }
     }
 }

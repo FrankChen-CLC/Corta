@@ -62,7 +62,15 @@ public nonisolated final class TerminalRenderer: @unchecked Sendable {
     }
     private(set) var backend: Metal4Backend
     private(set) var backendGeneration = 0
+    /// Rebuilds since the queue last proved itself; see
+    /// `recoverBackendIfNeeded`.
     private var recoveryAttempts = 0
+    /// When the current queue replaced a failed one. Time, not a frame
+    /// count: an idle pane may draw a handful of frames in a day.
+    private var rebuiltAt: SuspendingClock.Instant?
+    /// A rebuilt queue that has completed a frame and lasted this long is
+    /// healthy, and the next stall starts a fresh count.
+    private static let provenQueueAge: Duration = .seconds(10)
     /// Keep resources of old in-flight frames alive while the new queue draws.
     /// At most three replaced queues are retained per renderer.
     private var retiredBackends: [Metal4Backend] = []
@@ -299,15 +307,24 @@ public nonisolated final class TerminalRenderer: @unchecked Sendable {
         set { access.withLock { backend.presentsByCopy = newValue } }
     }
 
-    /// An unusable device cannot cause an unlimited reconstruction loop.
+    /// An unusable device cannot cause an unlimited reconstruction loop:
+    /// three rebuilds in a row, each failing within ten seconds or before
+    /// completing a frame, give up. Rebuilds a long-lived pane needed days apart do not add up.
     @discardableResult
     func recoverBackendIfNeeded() throws -> Bool {
         access.lock()
         defer { access.unlock() }
         retiredBackends.removeAll { !$0.hasFramesInFlight }
+        if let rebuiltAt, backend.completedFrameCount > 0,
+            rebuiltAt.duration(to: .now) >= Self.provenQueueAge
+        {
+            recoveryAttempts = 0
+            self.rebuiltAt = nil
+        }
         guard backend.requiresRecovery else { return false }
         guard recoveryAttempts < 3 else { throw Metal4BackendError.recoveryExhausted }
         recoveryAttempts += 1
+        rebuiltAt = .now
         let replacement = try Metal4Backend(device: backend.device)
         replacement.presentsByCopy = backend.presentsByCopy
         retiredBackends.append(backend)
