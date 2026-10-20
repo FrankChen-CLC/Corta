@@ -129,6 +129,16 @@ grapheme cluster that compares unequal to `"'"`; matched by `Character`, the
 quote was written raw and closed the quoted run. The app-typed `cd` of Go to
 Parent Directory and Go to Project Root uses the same quoting.
 
+Command History's **Fill** and **Run** send a command read back from the
+grid, between OSC 133 marks that any output can forge. Fill only types it;
+Run also sends Return, so it does so only for text the user saw whole: one
+line, no tab, no wider than the row laid it out — measured in the row's own
+font, since a scalar count let wide characters push a payload past the
+truncation — and the same text the row drew, since output can rewrite the
+record's row between the list's once-a-second refreshes and the click.
+Anything else is filled, to be read at the prompt and run by the user's
+Return.
+
 ### 2.5 Bidirectional and invisible characters
 
 Corta does not implement RTL/bidi (`DESIGN.md` §6), which removes the
@@ -442,7 +452,9 @@ terminal content; `applicationSupportsSecureRestorableState` is not the
 policy switch for Corta's own JSON metadata.
 
 **Notifications carry no terminal content.** The long-task notification
-(M6.3) reports a duration and the window title, never the command or any
+(M6.3) reports a duration under the tab's own name or its directory, never
+the window title — an OSC 0/2 title is a program's text, which macOS would
+show as Corta's own words, lock screen included — nor the command or any
 output: Notification Center is a second store, outside the app, with its
 own retention — and the grid is full of things that must not go there.
 

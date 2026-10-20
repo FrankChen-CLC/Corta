@@ -62,6 +62,26 @@ Versioning for compatibility changes.
   family that is not installed, or not one width, draws as System
   Monospaced and Settings shows a Font Status row saying why (#372).
 
+### Security
+
+- Command History's **Run** sends Return only for a command its row showed
+  whole, measured as drawn. The check counted up to 80 characters, more
+  than the column shows at the window's default width, and a wide
+  character counted as one: a forged history entry could hide the end of
+  the command it ran. Run also fills, rather than runs, a command whose
+  row output rewrote after the list last showed it.
+- Hovering a line built of combining-mark clusters no longer freezes the
+  window: joining a row's text took time in the square of its width, and
+  a link or file-reference check on such a line ran for seconds on every
+  mouse move. Such a cluster also no longer shifts where a match on the
+  rest of the line is drawn.
+- A keyboard-protocol pop (`CSI < n u`) costs the depth of the stack, not
+  the `n` the program asked for: a stream of large pops kept the pane
+  busy far beyond its size.
+- A long-task notification is titled with the tab's name you gave it, or
+  its directory. It used the window title, which a program sets with OSC
+  0 or 2, so any output could post a notification worded as Corta's own.
+
 ## [1.2.3] - 2026-10-19
 
 ### Added
