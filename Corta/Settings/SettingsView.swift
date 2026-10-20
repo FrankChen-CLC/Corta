@@ -223,9 +223,43 @@ struct SettingsView: View {
             }
             .accessibilityIdentifier("appearance-mode")
 
-            LabeledContent(L10n.text("settings.label.font")) {
-                Text(L10n.text("settings.font.systemMonospaced"))
-                    .accessibilityIdentifier("supported-font")
+            Picker(L10n.text("settings.label.font"), selection: bind(model.fontFamily, model.setFontFamily)) {
+                Text(L10n.text("settings.font.systemMonospaced")).tag(Configuration.systemFontFamily)
+                // A configured family the list lacks — not installed, not
+                // verified, or not measured yet — still shows as chosen.
+                if model.fontFamily != Configuration.systemFontFamily
+                    && !model.availableFonts.contains(where: { $0.name == model.fontFamily })
+                {
+                    Text(model.fontFamily).tag(model.fontFamily)
+                }
+                if !model.appleFonts.isEmpty {
+                    Section(L10n.text("settings.font.group.apple")) {
+                        ForEach(model.appleFonts, id: \.name) { Text($0.name).tag($0.name) }
+                    }
+                }
+                if !model.userFonts.isEmpty {
+                    Section(L10n.text("settings.font.group.user")) {
+                        ForEach(model.userFonts, id: \.name) { Text($0.name).tag($0.name) }
+                    }
+                }
+            }
+            .accessibilityIdentifier("font-family")
+            .help(L10n.text("settings.help.font"))
+            .task { await model.loadFonts() }
+            if !model.fontDetail.isEmpty {
+                Text(model.fontDetail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("font-detail")
+            }
+            if model.fontStatus.kind != .none {
+                LabeledContent(L10n.text("settings.label.fontStatus")) {
+                    StatusRowView(
+                        status: model.fontStatus,
+                        action: Self.action(if: model.fontStatus.kind == .failed) {
+                            model.retryFontResolution()
+                        })
+                }
             }
             LabeledContent(L10n.text("settings.label.size")) {
                 Stepper(value: bind(model.fontSize, model.setFontSize), in: Configuration.fontSizeRange) {

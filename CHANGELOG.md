@@ -10,6 +10,34 @@ Versioning for compatibility changes.
 
 ## [Unreleased]
 
+### Added
+
+- Settings ▸ Appearance ▸ Font chooses the terminal font again: System
+  Monospaced, or any installed monospaced family whose regular, bold and
+  italic faces keep one width, grouped as Apple's or yours, with a line
+  saying where the chosen font comes from and whether it carries its own
+  CJK design. The list follows fonts installed while Corta runs (#372). A family whose rows are one em tall, as many CJK families
+  declare, gets a line height of at least 1.15 em, so rows no longer touch.
+
+### Fixed
+
+- A symbol the font lacks, such as a prompt's `❯`, is no longer drawn bold
+  beside regular text, nor below the line: macOS answered SF Mono Medium
+  with Menlo Bold. Arrows, dingbats, geometric and technical symbols from a
+  fallback font are now drawn in its regular weight and centred where the
+  font centres its own; braille, Powerline and Nerd Font icons, and pieces
+  whose height is their meaning (scan lines, bracket pieces, corner
+  triangles), keep their place.
+- System Monospaced is drawn in its Regular weight, as every other family
+  and the CJK and symbol fallbacks are, so text and its fallbacks share one
+  weight. It was Medium, which left Chinese and Japanese a step lighter
+  beside it.
+- CJK in bold text is bold: it was drawn in PingFang SC Regular whatever
+  the style, and now uses PingFang SC Semibold under a bold face.
+- `font-family` in the config file is no longer replaced with `system`. A
+  family that is not installed, or not one width, draws as System
+  Monospaced and Settings shows a Font Status row saying why (#372).
+
 ## [1.2.3] - 2026-10-19
 
 ### Added

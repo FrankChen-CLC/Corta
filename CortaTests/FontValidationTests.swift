@@ -70,6 +70,29 @@ import Testing
                 == CTFontCopyPostScriptName(system) as String)
     }
 
+    /// `NSFont(name:)` also takes a face, which `isUsable` never measured:
+    /// a face name is not a family, reported as missing and never drawn.
+    @Test func aFaceNameIsNotAFamily() {
+        #expect(TerminalFont.resolution(forFamily: "Menlo-Bold") == .missing(requested: "Menlo-Bold"))
+        #expect(!MonospacedFontCatalog.isUsable(family: "Menlo-Bold"))
+        let system = TerminalFont.primary(ofSize: 12, family: nil)
+        #expect(
+            CTFontCopyPostScriptName(TerminalFont.primary(ofSize: 12, family: "Menlo-Bold")) as String
+                == CTFontCopyPostScriptName(system) as String)
+    }
+
+    /// The list comes from Core Text, off the main thread, without the
+    /// private "." system families; a refresh gives the same verdicts.
+    @Test func theCatalogListsPublicFamiliesAndSurvivesARefresh() {
+        let names = MonospacedFontCatalog.families()
+        #expect(names.contains("Menlo"))
+        #expect(!names.contains { $0.hasPrefix(".") })
+        MonospacedFontCatalog.refresh()
+        #expect(MonospacedFontCatalog.isUsable(family: "Menlo"))
+        #expect(!MonospacedFontCatalog.isUsable(family: "Helvetica"))
+        #expect(MonospacedFontCatalog.families() == names)
+    }
+
     // MARK: - Styles
 
     /// A family with real italics must use them; the four styles must be four
@@ -153,5 +176,92 @@ import Testing
             device: device, font: CTFontCreateWithName("Menlo" as CFString, 14, nil))
         let info = try #require(atlas.glyph(shaping: 0x00A0, style: .regular))  // NBSP
         #expect(!info.isMissing)
+    }
+
+    // MARK: - Fallback symbols
+
+    /// System Monospaced, as the app builds it, with the pinned cascade.
+    private static func systemAtlas() throws -> GlyphAtlas? {
+        guard let device = makeDevice() else {
+            Issue.record("No Metal device available in this environment")
+            return nil
+        }
+        return try GlyphAtlas(device: device, font: TerminalFont.primary(ofSize: 24))
+    }
+
+    private static func inkMidY(_ runs: [GlyphAtlas.ShapedRun]) -> CGFloat {
+        runs.reduce(CGRect.null) { bounds, run in
+            var glyphs = run.glyphs
+            var rects = [CGRect](repeating: .zero, count: glyphs.count)
+            CTFontGetBoundingRectsForGlyphs(run.font, .horizontal, &glyphs, &rects, glyphs.count)
+            return zip(rects, run.positions).reduce(bounds) { $0.union($1.0.offsetBy(dx: $1.1.x, dy: $1.1.y)) }
+        }.midY
+    }
+
+    /// Core Text answered SF Mono Medium's missing `❯` with Menlo Bold; the
+    /// prompt's chevron drew heavier than the `~` beside it.
+    @Test func aFallbackSymbolIsNoBolderThanItsText() throws {
+        guard let atlas = try Self.systemAtlas() else { return }
+        let regular = try #require(atlas.shape("❯", style: .regular).runs.first)
+        #expect(!CTFontGetSymbolicTraits(regular.font).contains(.traitBold))
+        #expect(!regular.glyphs.contains(0))
+        // Bold text keeps a bold fallback.
+        let bold = try #require(atlas.shape("❯", style: .bold).runs.first)
+        #expect(CTFontGetSymbolicTraits(bold.font).contains(.traitBold))
+    }
+
+    /// A fallback symbol sits where SF Mono centres its own: half its cap
+    /// height. Menlo's `❯` was 0.07 em below that.
+    @Test func aFallbackSymbolIsCentredOnThePrimary() throws {
+        guard let atlas = try Self.systemAtlas() else { return }
+        let capMid = CTFontGetCapHeight(atlas.fonts[0]) / 2
+        for symbol in ["❯", "◆", "⇒"] {
+            let runs = atlas.shape(symbol, style: .regular).runs
+            #expect(abs(Self.inkMidY(runs) - capMid) < 0.5, "\(symbol)")
+        }
+    }
+
+    /// Braille dots and the primary's own symbols stay where their font put
+    /// them: a graph needs its dots in place.
+    @Test func brailleAndThePrimarysOwnGlyphsAreNotMoved() throws {
+        guard let atlas = try Self.systemAtlas() else { return }
+        for text in ["⠁", "→", "中"] {
+            let runs = atlas.shape(text, style: .regular).runs
+            #expect(runs.allSatisfy { $0.positions.allSatisfy { $0.y == 0 } }, "\(text)")
+        }
+    }
+
+    /// Pieces whose height is their meaning keep it: ncurses' scan lines,
+    /// bracket pieces that join across rows, corner triangles.
+    @Test func positionalSymbolsAreNotCentred() {
+        for text in ["⎺", "⎽", "⎛", "⌠", "◢", "◥", "◜", "◸"] {
+            #expect(!GlyphAtlas.isStandaloneSymbol(Array(text.utf16)), "\(text)")
+        }
+        for text in ["❯", "◆", "⇒", "●", "⏎"] {
+            #expect(GlyphAtlas.isStandaloneSymbol(Array(text.utf16)), "\(text)")
+        }
+    }
+
+    /// Unbolding a fallback keeps its slant: a fallback run under a sheared
+    /// family carries the shear, and `❯` must not stand upright among
+    /// sheared letters.
+    @Test func anUnboldedFallbackKeepsItsSlant() {
+        var shear = CGAffineTransform(a: 1, b: 0, c: 0.21, d: 1, tx: 0, ty: 0)
+        let bold = CTFontCreateWithName("Menlo-Bold" as CFString, 24, &shear)
+        let lighter = GlyphAtlas.lighter(than: bold)
+        #expect(CTFontCopyPostScriptName(lighter) as String == "Menlo-Regular")
+        #expect(CTFontGetMatrix(lighter).c == 0.21)
+        let boldItalic = CTFontCreateWithName("Menlo-BoldItalic" as CFString, 24, nil)
+        #expect(CTFontCopyPostScriptName(GlyphAtlas.lighter(than: boldItalic)) as String == "Menlo-Italic")
+    }
+
+    /// CJK in bold text is bold: the cascade under a real bold face is
+    /// PingFang Semibold, not the Regular that drew 粗体 light.
+    @Test func boldCJKUsesABoldFallback() throws {
+        guard let atlas = try Self.systemAtlas() else { return }
+        let regular = try #require(atlas.shape("粗", style: .regular).runs.first)
+        let bold = try #require(atlas.shape("粗", style: .bold).runs.first)
+        #expect(CTFontCopyPostScriptName(regular.font) as String == "PingFangSC-Regular")
+        #expect(CTFontCopyPostScriptName(bold.font) as String == "PingFangSC-Semibold")
     }
 }

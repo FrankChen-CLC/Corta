@@ -31,9 +31,22 @@ nonisolated enum TerminalFont {
         CTFontDescriptorCreateWithNameAndSize("PingFangSC-Regular" as CFString, 0),
         CTFontDescriptorCreateWithNameAndSize("AppleColorEmoji" as CFString, 0),
     ]
+    /// Under a real bold face: CJK in bold text was PingFang Regular, so
+    /// `SGR 1` left 粗体 as light as the text around it.
+    private nonisolated(unsafe) static let boldCascadeList: [CTFontDescriptor] = [
+        CTFontDescriptorCreateWithNameAndSize("PingFangSC-Semibold" as CFString, 0),
+        CTFontDescriptorCreateWithNameAndSize("AppleColorEmoji" as CFString, 0),
+    ]
 
-    /// The primary font, cascade pinned. `.medium` matches Terminal.app's stem
-    /// density at 12pt; `.regular` reads soft through the grayscale atlas.
+    /// System Monospaced's weight: Regular, like every other family and the
+    /// fallbacks, so text and its CJK and symbol fallbacks share one weight.
+    /// SF Mono alone was once Medium, to look as dense as Terminal.app; that
+    /// left PingFang and every chosen family a step lighter beside it. No face
+    /// is thickened: a stroke matching Medium's ink, or system font smoothing
+    /// (heavier still), read heavier than the faces as drawn.
+    static let systemWeight: NSFont.Weight = .regular
+
+    /// The primary font, cascade pinned.
     ///
     /// - Parameter size: in points.
     /// - Parameter family: nil for System Monospaced. A family that isn't
@@ -42,18 +55,42 @@ nonisolated enum TerminalFont {
     static func primary(ofSize size: CGFloat, family: String? = nil) -> CTFont {
         if let family, family != Configuration.systemFontFamily,
             MonospacedFontCatalog.isUsable(family: family),
-            let font = NSFont(name: family, size: size) ?? namedFamily(family, size: size)
+            let font = namedFamily(family, size: size)
         {
             return pinningCascadeList(font as CTFont, size: size)
         }
-        let system = NSFont.monospacedSystemFont(ofSize: size, weight: .medium) as CTFont
+        let system = NSFont.monospacedSystemFont(ofSize: size, weight: systemWeight) as CTFont
         return pinningCascadeList(system, size: size)
     }
 
-    /// Resolves a family name ("Menlo"); `NSFont(name:)` wants a face.
+    /// Resolves a family name ("Menlo"). Not `NSFont(name:)`, which also
+    /// takes a face ("Menlo-Bold") that `isUsable` never measured.
     private static func namedFamily(_ family: String, size: CGFloat) -> NSFont? {
         let descriptor = NSFontDescriptor(fontAttributes: [.family: family])
         return NSFont(descriptor: descriptor, size: size)
+    }
+
+    /// Why `primary` would not use a configured family.
+    enum FontResolution: Equatable {
+        case resolved
+        case missing(requested: String)
+        case invalidForGrid(requested: String)
+    }
+
+    /// What `primary` does with `family`, for the settings page to explain
+    /// a fallback instead of leaving it silent.
+    static func resolution(forFamily family: String?) -> FontResolution {
+        guard let family, family != Configuration.systemFontFamily else { return .resolved }
+        // Not `namedFamily`: a descriptor for an unknown family still
+        // matches some other face, which would report "uneven" instead. A
+        // face name ("JetBrainsMono-Regular") is not a family either.
+        guard NSFontManager.shared.availableMembers(ofFontFamily: family) != nil else {
+            return .missing(requested: family)
+        }
+        guard MonospacedFontCatalog.isUsable(family: family) else {
+            return .invalidForGrid(requested: family)
+        }
+        return .resolved
     }
 
     /// A styled variant for the atlas, and whether its bold is synthetic.
@@ -86,7 +123,9 @@ nonisolated enum TerminalFont {
         )
     }
 
-    /// Re-applies the pinned cascade; idempotent.
+    /// Re-applies the pinned cascade, the bold one under a real bold face;
+    /// idempotent. A synthetic bold keeps the regular cascade: its stroke
+    /// already thickens the fallback glyphs too.
     ///
     /// A copy of the font in hand, not a font resolved again from its
     /// descriptor: that lookup goes through the font daemon, and when it
@@ -94,8 +133,9 @@ nonisolated enum TerminalFont {
     /// answered with LastResort — a face with no ASCII glyphs, for the
     /// session's whole life. The copy keeps the face and its matrix.
     static func pinningCascadeList(_ font: CTFont, size: CGFloat) -> CTFont {
+        let isBold = CTFontGetSymbolicTraits(font).contains(.traitBold)
         let attributes = CTFontDescriptorCreateWithAttributes(
-            [kCTFontCascadeListAttribute: cascadeList] as CFDictionary)
+            [kCTFontCascadeListAttribute: isBold ? boldCascadeList : cascadeList] as CFDictionary)
         return CTFontCreateCopyWithAttributes(font, size, nil, attributes)
     }
 }

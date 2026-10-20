@@ -14,8 +14,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-import AppKit
+import Foundation
 import CoreText
+import Synchronization
 
 /// Which installed families a grid can actually lay out (D12). The
 /// renderer assumes every glyph in the regular, bold, italic and
@@ -23,9 +24,27 @@ import CoreText
 /// doesn't promise. Common failures: a wider bold face, digits or
 /// box-drawing off the grid, and bitmap or colour faces with no outlines.
 ///
-/// Since D11 only System Monospaced is offered, so this checks the family a
-/// hand-edited config names rather than listing what is installed.
+/// Families come from Core Text, so installed fonts appear, and are verified
+/// on the faces Corta uses. Measuring hundreds is slow, so the list and each
+/// family's verdict are cached; `refresh()` drops both.
 nonisolated enum MonospacedFontCatalog {
+    /// Where a family's file lives, which is what the picker groups by.
+    enum Origin: Sendable, Equatable {
+        /// Under `/System/Library`: shipped with macOS, or one of Apple's
+        /// on-demand fonts already downloaded.
+        case apple
+        /// Anywhere else — `~/Library/Fonts`, `/Library/Fonts`.
+        case user(path: String)
+    }
+
+    struct Entry: Sendable, Equatable {
+        let name: String
+        let origin: Origin
+        /// Carries its own Han, kana or Hangul, so its letters and symbols
+        /// follow a CJK design (a raised `~`, curly quotes).
+        let hasCJK: Bool
+    }
+
     /// Advances scale linearly; this only sets the tolerance's units.
     private static let measurementSize: CGFloat = 12
     /// True monospace varies far less; "mostly fixed" misses by tenths.
@@ -34,28 +53,91 @@ nonisolated enum MonospacedFontCatalog {
     /// Printable ASCII: prompts, borders and numbers.
     private static let measuredCharacters: [UniChar] = (0x20...0x7E).map(UniChar.init)
 
+    /// 日, あ, 한: one each of Han, kana and Hangul.
+    private static let cjkProbes: [UniChar] = [0x65E5, 0x3042, 0xD55C]
+
+    private struct Cache {
+        var entries: [Entry]?
+        /// `isUsable` by family: `primary` asks on every frame that draws a
+        /// shell overlay, and a picker change asks once per pane.
+        var usable: [String: Bool] = [:]
+        /// Bumped by `refresh()`, so a scan that began before it is not kept.
+        var generation = 0
+    }
+
+    /// The list is filled off the main thread by the settings page; the lock
+    /// is never held while measuring, so `refresh()` on the main thread
+    /// does not wait out a scan.
+    private static let cache = Mutex(Cache())
+
+    /// The installed families the grid can lay out, sorted for a picker.
+    static func entries() -> [Entry] {
+        let (cached, generation) = cache.withLock { ($0.entries, $0.generation) }
+        if let cached { return cached }
+        // Core Text, not `NSFontManager`, which is AppKit's to use on the
+        // main thread. Names starting with "." are private system faces.
+        let names = (CTFontManagerCopyAvailableFontFamilyNames() as? [String] ?? [])
+            .filter { !$0.hasPrefix(".") }
+        let entries = Set(names).sorted().filter(isUsable(family:)).compactMap(entry(for:))
+        cache.withLock { if $0.generation == generation { $0.entries = entries } }
+        return entries
+    }
+
+    static func families() -> [String] { entries().map(\.name) }
+
+    /// Describes an installed family; nil when none is.
+    static func entry(for family: String) -> Entry? {
+        guard let font = font(ofFamily: family) else { return nil }
+        let path = (CTFontCopyAttribute(font, kCTFontURLAttribute) as? URL)?.path ?? ""
+        let origin: Origin = path.hasPrefix("/System/Library/") ? .apple : .user(path: path)
+        let hasCJK = cjkProbes.contains { probe in
+            var character = probe
+            var glyph = CGGlyph(0)
+            return CTFontGetGlyphsForCharacters(font, &character, &glyph, 1)
+        }
+        return Entry(name: family, origin: origin, hasCJK: hasCJK)
+    }
+
+    /// Forgets the list and the verdicts, for when the installed fonts change.
+    static func refresh() {
+        cache.withLock { $0 = Cache(generation: $0.generation + 1) }
+    }
+
     /// An outline face with uniform ASCII advances that its bold, italic and
     /// bold-italic faces keep. A missing italic passes (the regular face is
     /// used and sheared); only faces that exist and disagree fail.
     static func isUsable(family: String) -> Bool {
-        guard
-            let base = NSFont(
-                descriptor: NSFontDescriptor(fontAttributes: [.family: family]),
-                size: measurementSize),
-            let advance = uniformAdvance(of: base as CTFont)
+        let (known, generation) = cache.withLock { ($0.usable[family], $0.generation) }
+        if let known { return known }
+        let usable = measure(family: family)
+        cache.withLock { if $0.generation == generation { $0.usable[family] = usable } }
+        return usable
+    }
+
+    private static func measure(family: String) -> Bool {
+        guard let base = font(ofFamily: family), let advance = uniformAdvance(of: base)
         else { return false }
         let derivations: [CTFontSymbolicTraits] = [
             .traitBold, .traitItalic, [.traitBold, .traitItalic],
         ]
         for traits in derivations {
             let derived =
-                CTFontCreateCopyWithSymbolicTraits(base as CTFont, 0, nil, traits, traits)
-                ?? (base as CTFont)
+                CTFontCreateCopyWithSymbolicTraits(base, 0, nil, traits, traits) ?? base
             guard let derivedAdvance = uniformAdvance(of: derived),
                 abs(derivedAdvance - advance) <= tolerance
             else { return false }
         }
         return true
+    }
+
+    /// The family's default face, through Core Text: the catalog runs off
+    /// the main thread. A descriptor for an unknown family still matches
+    /// some other face, so the answer's family is checked.
+    private static func font(ofFamily family: String) -> CTFont? {
+        let descriptor = CTFontDescriptorCreateWithAttributes(
+            [kCTFontFamilyNameAttribute: family] as CFDictionary)
+        let font = CTFontCreateWithFontDescriptor(descriptor, measurementSize, nil)
+        return CTFontCopyFamilyName(font) as String == family ? font : nil
     }
 
     /// The shared ASCII advance, or nil if not outline, incomplete or uneven.
