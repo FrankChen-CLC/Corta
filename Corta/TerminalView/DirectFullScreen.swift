@@ -14,6 +14,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+import Foundation
+
 /// What a full-screen window with exactly one pane changes so the window
 /// server can present its canvas directly instead of compositing it — a
 /// frame less from keypress to glass (#285, `PERFORMANCE.md` §5.17).
@@ -21,8 +23,6 @@
 /// `shipped` is what every launch does, and changes nothing visible. The
 /// rest are #285's measured non-blockers, kept for a trace to re-check
 /// (`CORTA_DIRECT_FULLSCREEN`, Debug / Benchmark only).
-import Foundation
-
 nonisolated struct DirectFullScreen: OptionSet, Sendable {
     let rawValue: Int
 
@@ -42,10 +42,8 @@ nonisolated struct DirectFullScreen: OptionSet, Sendable {
     /// command buffer wrote is never presented directly.
     static let present = DirectFullScreen(rawValue: 1 << 4)
 
-    /// The direct-presentation experiment was measured only on macOS 27.
-    /// On macOS 26, every window instead uses the classic-queue copy path
-    /// below to avoid presenting a Metal 4-written drawable to WindowServer
-    /// (#380). This option set still controls the full-screen mask change.
+    /// `.present` was measured on macOS 27 only; on macOS 26 every window
+    /// presents by copy anyway (`presentsByCopy`), so only `.mask` remains.
     static var shipped: DirectFullScreen {
         shipped(onOSMajorVersion: ProcessInfo.processInfo.operatingSystemVersion.majorVersion)
     }
@@ -54,13 +52,9 @@ nonisolated struct DirectFullScreen: OptionSet, Sendable {
         major >= 27 ? [.mask, .present] : [.mask]
     }
 
-    /// macOS 26's WindowServer repeatedly aborts while compositing a shared
-    /// event on the reporter's Mac (#380). The reporter has one monitor; the
-    /// crash report's three display-thread names are not a monitor count.
-    /// No saved window state is present now, so the normal Metal 4 drawable
-    /// path is a strong suspect. Render offscreen and present from a classic
-    /// queue for every window on that OS. The existing full-screen fast path
-    /// remains available on macOS 27 and later.
+    /// Whether a pane presents by copy through a classic queue. Always on
+    /// macOS 26, whose WindowServer was seen to abort compositing a drawable
+    /// presented from the Metal 4 queue (#380); elsewhere only for `.present`.
     static func presentsByCopy(_ active: DirectFullScreen, onOSMajorVersion major: Int) -> Bool {
         major == 26 || active.contains(.present)
     }

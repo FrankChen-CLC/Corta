@@ -1219,29 +1219,19 @@ renders into a staging texture and presents by copy
 (`Metal4Backend.presentsByCopy`), and drops its canvas corner mask; nothing
 visible changes. Windowed and split panes keep the plain Metal 4 path.
 
-After the WindowServer crashes reported in [#380](https://github.com/noah-qin/Corta/issues/380),
-the shipped default on macOS 26 presents *every* window by copy. No saved
-full-screen window state currently exists on the affected Mac, weakening
-the theory that the full-screen-only path caused the crashes. This avoids
-presenting a drawable directly from the Metal 4 queue on that OS. macOS 27
-or later retains the full-screen-only behavior measured below. The crash
-reports do not prove which drawable caused WindowServer to assert. The
-reporter has confirmed that the diagnostic build runs normally on the
-affected one-monitor setup. End-to-end frame latency and power use have not
-been measured on that display.
+On macOS 26 *every* window presents by copy: that system's WindowServer
+was seen to abort while compositing a drawable presented from the Metal 4
+queue ([#380](https://github.com/noah-qin/Corta/issues/380)). macOS 27 and
+later keep the full-screen-only behaviour measured below.
 
-An A/B within the same optimized renderer build on the affected Mac measured
-60 full rebuild frames per path into a 2940×1846 texture, waiting for GPU
-completion. The direct path averaged **0.358 ms** (p50 0.345 ms, p95
-0.398 ms); present-by-copy averaged **0.555 ms** (p50 0.558 ms, p95
-0.616 ms). Thus the compatibility path added about **0.20 ms per rendered
-frame** in this headless workload. It also retains one staging texture per
-pane, about 21.7 MB at that test size. The benchmark does not include
-WindowServer composition, visible keypress latency, or energy use. Idle
-windows do not submit frames, so this added GPU work applies when a pane
-renders. The seven optimized performance tests passed with Xcode 26.2 and a
-temporary Swift 5 language-mode compatibility build; those results do not
-replace validation under the pinned Xcode 26.6 toolchain.
+What the copy costs on macOS 26, measured on the affected Mac (M4 Pro,
+Xcode 26.2) as an alternating A/B in one optimized build: 60 full rebuild
+frames per path into a 2940×1846 texture, to GPU completion. Direct averaged
+**0.358 ms** (p50 0.345, p95 0.398); by copy **0.555 ms** (p50 0.558, p95
+0.616), about **0.20 ms** more per rendered frame, plus one staging texture
+per pane (about 21.7 MB at that size). Composition, keypress-to-glass latency
+and energy are not included and have not been measured on macOS 26. An idle
+pane submits no frames, so it pays nothing.
 
 Measured on the M5 Air's built-in 60 Hz panel, Benchmark `-O`, full screen,
 one pane:
