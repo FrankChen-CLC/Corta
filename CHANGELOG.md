@@ -36,6 +36,7 @@ Versioning for compatibility changes.
   drawable presentation path suspected in the repeated WindowServer crashes
   of #380. The reporter confirmed a diagnostic build launches normally
   on the affected Mac; macOS 27 keeps its measured presentation behavior.
+  Thanks to @FrankChen-CLC for the investigation and the fix (#386).
 
 ## [1.3.0] - 2026-10-21
 
