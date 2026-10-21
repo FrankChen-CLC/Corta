@@ -21,6 +21,8 @@
 /// `shipped` is what every launch does, and changes nothing visible. The
 /// rest are #285's measured non-blockers, kept for a trace to re-check
 /// (`CORTA_DIRECT_FULLSCREEN`, Debug / Benchmark only).
+import Foundation
+
 nonisolated struct DirectFullScreen: OptionSet, Sendable {
     let rawValue: Int
 
@@ -40,7 +42,32 @@ nonisolated struct DirectFullScreen: OptionSet, Sendable {
     /// command buffer wrote is never presented directly.
     static let present = DirectFullScreen(rawValue: 1 << 4)
 
-    static let shipped: DirectFullScreen = [.mask, .present]
+    /// The direct-presentation experiment was measured only on macOS 27.
+    /// On macOS 26, every window instead uses the classic-queue copy path
+    /// below to avoid presenting a Metal 4-written drawable to WindowServer
+    /// (#380). This option set still controls the full-screen mask change.
+    static var shipped: DirectFullScreen {
+        shipped(onOSMajorVersion: ProcessInfo.processInfo.operatingSystemVersion.majorVersion)
+    }
+
+    static func shipped(onOSMajorVersion major: Int) -> DirectFullScreen {
+        major >= 27 ? [.mask, .present] : [.mask]
+    }
+
+    /// macOS 26's WindowServer repeatedly aborts while compositing a shared
+    /// event on the reporter's Mac (#380). The reporter has one monitor; the
+    /// crash report's three display-thread names are not a monitor count.
+    /// No saved window state is present now, so the normal Metal 4 drawable
+    /// path is a strong suspect. Render offscreen and present from a classic
+    /// queue for every window on that OS. The existing full-screen fast path
+    /// remains available on macOS 27 and later.
+    static func presentsByCopy(_ active: DirectFullScreen, onOSMajorVersion major: Int) -> Bool {
+        major == 26 || active.contains(.present)
+    }
+
+    static func presentsByCopy(_ active: DirectFullScreen) -> Bool {
+        presentsByCopy(active, onOSMajorVersion: ProcessInfo.processInfo.operatingSystemVersion.majorVersion)
+    }
 
     static let all: DirectFullScreen = [.toolbar, .mask, .overlays, .colorspace, .present]
 

@@ -10,6 +10,14 @@ Versioning for compatibility changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- On macOS 26, every terminal window now renders offscreen and presents its
+  drawable through a classic Metal queue. This avoids the normal Metal 4
+  drawable presentation path suspected in the repeated WindowServer crashes
+  of #380. The reporter confirmed a diagnostic build launches normally
+  on the affected Mac; macOS 27 keeps its measured presentation behavior.
+
 ## [1.3.0] - 2026-10-21
 
 ### Added
