@@ -223,26 +223,10 @@ struct SettingsView: View {
             }
             .accessibilityIdentifier("appearance-mode")
 
-            Picker(L10n.text("settings.label.font"), selection: bind(model.fontFamily, model.setFontFamily)) {
-                Text(L10n.text("settings.font.systemMonospaced")).tag(Configuration.systemFontFamily)
-                // A configured family the list lacks — not installed, not
-                // verified, or not measured yet — still shows as chosen.
-                if model.fontFamily != Configuration.systemFontFamily
-                    && !model.availableFonts.contains(where: { $0.name == model.fontFamily })
-                {
-                    Text(model.fontFamily).tag(model.fontFamily)
-                }
-                if !model.appleFonts.isEmpty {
-                    Section(L10n.text("settings.font.group.apple")) {
-                        ForEach(model.appleFonts, id: \.name) { Text($0.name).tag($0.name) }
-                    }
-                }
-                if !model.userFonts.isEmpty {
-                    Section(L10n.text("settings.font.group.user")) {
-                        ForEach(model.userFonts, id: \.name) { Text($0.name).tag($0.name) }
-                    }
-                }
-            }
+            FontFamilyPicker(
+                title: L10n.text("settings.label.font"), selection: bind(model.fontFamily, model.setFontFamily),
+                defaultTag: Configuration.systemFontFamily,
+                defaultLabel: L10n.text("settings.font.systemMonospaced"), entries: model.availableFonts)
             .accessibilityIdentifier("font-family")
             .help(L10n.text("settings.help.font"))
             .task { await model.loadFonts() }
@@ -260,6 +244,21 @@ struct SettingsView: View {
                             model.retryFontResolution()
                         })
                 }
+            }
+            FontFamilyPicker(
+                title: L10n.text("settings.label.cjkFont"),
+                selection: bind(model.cjkFontFamily, model.setCJKFontFamily),
+                defaultTag: Configuration.automaticCJKFontFamily,
+                defaultLabel: L10n.text("settings.font.cjkAutomatic"), entries: model.availableCJKFonts)
+            .accessibilityIdentifier("font-family-cjk")
+            .help(L10n.text("settings.help.cjkFont"))
+            // Fallback off draws only the font: the CJK font would never be used.
+            .disabled(!model.fontFallback)
+            if !model.cjkFontNotice.isEmpty {
+                Text(model.cjkFontNotice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("cjk-font-notice")
             }
             LabeledContent(L10n.text("settings.label.size")) {
                 Stepper(value: bind(model.fontSize, model.setFontSize), in: Configuration.fontSizeRange) {
@@ -763,5 +762,39 @@ private struct StatusNetworkInterfaceField: View {
             .onAppear { value = model.statusNetworkInterface }
             .onChange(of: model.statusNetworkInterface) { _, name in value = name }
             .help(L10n.text("status.network.help"))
+    }
+}
+
+/// A font family menu: the default first, then the catalog's families
+/// grouped as Apple's or the user's. The font and CJK font pickers.
+private struct FontFamilyPicker: View {
+    let title: String
+    let selection: Binding<String>
+    /// What the default reads as in the file: `system`, `auto`.
+    let defaultTag: String
+    let defaultLabel: String
+    let entries: [MonospacedFontCatalog.Entry]
+
+    var body: some View {
+        Picker(title, selection: selection) {
+            Text(defaultLabel).tag(defaultTag)
+            // A configured family the list lacks — not installed, not
+            // verified, or not measured yet — still shows as chosen.
+            if selection.wrappedValue != defaultTag && !entries.contains(where: { $0.name == selection.wrappedValue }) {
+                Text(selection.wrappedValue).tag(selection.wrappedValue)
+            }
+            let apple = entries.filter { $0.origin == .apple }
+            if !apple.isEmpty {
+                Section(L10n.text("settings.font.group.apple")) {
+                    ForEach(apple, id: \.name) { Text($0.name).tag($0.name) }
+                }
+            }
+            let user = entries.filter { $0.origin != .apple }
+            if !user.isEmpty {
+                Section(L10n.text("settings.font.group.user")) {
+                    ForEach(user, id: \.name) { Text($0.name).tag($0.name) }
+                }
+            }
+        }
     }
 }
